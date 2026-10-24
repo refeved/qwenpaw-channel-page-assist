@@ -115,3 +115,12 @@ node tests/qwenpaw-channel-browser.mjs
 这组测试使用真实插件 HTTP、BaseChannel 和 TaskTracker，但 Agent 执行函数、
 ChatManager 与工具发现配置是隔离的确定性测试替身，**不是模型、记忆和真实
 审批服务的端到端验收**。最终仍需在已有 Agent 上手工验证实际模型和工具。
+
+## 许可与免责声明
+
+本仓库采用 [Apache License 2.0](LICENSE)。
+
+本项目是独立的社区插件，与 QwenPaw、Page Assist 项目无隶属关系，也未获其背书。
+插件通过 QwenPaw 的公开插件 API 运行，不包含上游源代码。Page Assist 为
+Muhammed Nazeem 的 MIT 许可项目，QwenPaw 为 Apache-2.0 项目；
+相关名称与图标归各自权利人所有。
