@@ -1,0 +1,11 @@
+{
+  "id": "page-assist",
+  "name": "Page Assist",
+  "version": "0.1.0",
+  "type": "channel",
+  "description": "Single-Agent browser channel with a dedicated authenticated HTTP listener.",
+  "author": "Page Assist integration contributors",
+  "entry": { "backend": "plugin.py" },
+  "dependencies": ["aiohttp>=3.8.0", "pydantic>=2.0"],
+  "qwenpaw_version": { "min": "2.2.2.post1" }
+}
