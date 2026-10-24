@@ -1,6 +1,7 @@
 # Page Assist channel (0.1)
 
-仓库：`qwenpaw-channel-page-assist`。插件清单及入口直接位于仓库根目录，
+仓库：[refeved/qwenpaw-channel-page-assist](https://github.com/refeved/qwenpaw-channel-page-assist)。
+插件清单及入口直接位于仓库根目录，
 无需克隆或修改 QwenPaw 源码。宿主使用 pip 发布版；插件仍运行在宿主进程内。
 
 独立安装的单 Agent 频道插件。运行在 QwenPaw 进程内，自带一个 HTTP 监听端口；
