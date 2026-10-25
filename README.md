@@ -6,7 +6,10 @@
 
 独立安装的单 Agent 频道插件。运行在 QwenPaw 进程内，自带一个 HTTP 监听端口；
 不修改核心、不部署 Bridge，也不调用 OpenAI-compatible 聊天接口绕过原生 Agent。
-基线：QwenPaw `2.2.2.post1`。
+它是 Page Assist **Remote Agent** Provider 的首个后端实现。版本组合：
+QwenPaw `2.2.2.post1`、Page Assist `remote-agent-preview-1`、本插件
+`remote-agent-preview-1`。界面 Provider 名为 Remote Agent；协议、存储键、路由和
+前端客户端仍沿用 `qwenpaw` 命名空间。
 
 ## 第一版范围
 
@@ -19,6 +22,12 @@
   不实现逐 token 输出。
 - 原生审批仍然生效，但不提供浏览器审批卡片或批准 API。需要审批时另行打开
   QwenPaw Console 的原生审批界面；插件不会自动批准、降级权限或绕过检查。
+- Remote Agent 界面只保留文字聊天、显式网页／选区分享、当前实例内会话历史和
+  新建会话。本地 RAG、联网搜索、MCP、提示词、临时聊天、逐会话模型参数、
+  文件／图片上传、视觉／OCR、语音、Page Action 和 WebMCP 不提供或禁用；
+  未接通入口会说明原因。
+- Firefox 版本不显示 Remote Agent 入口（MV2 缺少
+  `chrome.storage.local.setAccessLevel`）；请使用 Chrome／Chromium。
 
 延期：全局多 Agent 发现、跨重启历史恢复、断线自动恢复、持久请求账本、
 取消按钮、富媒体、主动推送、审批卡片。不要依赖本版本作为生产远程网关。
@@ -55,13 +64,28 @@ ChannelManager 读取。不需要手工改全局 Agent 路由。
 `Page Assist channel listening on 127.0.0.1:8766`。
 本版本不依赖“先启动新监听、再关闭旧监听”的热替换流程；端口冲突会明确报错。
 
-重新构建并重新加载 Page Assist 扩展后，打开爪子图标 → 连接设置：
+以下步骤要求使用包含 Remote Agent Provider 的 Page Assist 构建
+（tag `remote-agent-preview-1` 或 `feat/qwenpaw-remote-channel` 分支）。
+重新构建并重新加载扩展后：
 
-1. 服务地址填写 `http://127.0.0.1:8766`，不是 Console 的端口。
-2. 浏览器凭据填写同一个 Browser token，不使用 Console 管理员令牌。
-3. Console 地址暂留空。第一版仍保留前端同源链接限制，而 Console 通常在不同
-   端口，因此需要手工打开原 Console，不通过聊天内容中的链接授权。
-4. 测试连接、保存、返回；首条问题自动创建聊天，顶部新建按钮可开始另一段聊天。
+1. 在 Chrome 侧边栏 header 左侧、Page Assist 字样之后，把 **Local models** 切换为
+   **Remote Agent**。首次使用且没有 provider 记录／Ollama URL 时，空态显示
+   “Choose how you want to chat”；选择 Remote Agent 且尚未配置时，连接表单内联展开。
+2. 已有配置可通过 header 切换器，或 options／侧栏设置中的独立 **Remote Agent** Tab
+   （`/settings/qwenpaw`）打开同一连接表单。该 Tab 与 General Settings、
+   OpenAI Compatible API、Manage Models 并列，不在 General Settings 中。
+3. 服务地址填写 `http://127.0.0.1:8766`，不是 Console 的端口。
+4. 浏览器凭据填写同一个 Browser token，不使用 Console 管理员令牌。
+5. Console 地址暂留空。第一版仍保留前端同源链接限制，而 Console 通常在不同端口，
+   因此需要手工打开原 Console，不通过聊天内容中的链接授权。
+6. 测试连接、保存、返回；首条问题自动创建聊天，顶部新建按钮可开始另一段聊天。
+
+![侧栏设置中的 Remote Agent Tab](docs/assets/page-assist-remote-agent-settings-tab.png)
+
+上图是侧栏设置的 Tab 栏；options 页的导航还额外提供 RAG、Ollama、MCP 等条目。
+
+远程路径不需要 Ollama 配置。Firefox 不提供 Remote Agent 入口；界面细节与最新行为
+见 Page Assist Fork 的 [Remote Agent 指南](https://github.com/refeved/page-assist-agent-usage/blob/feat/qwenpaw-remote-channel/docs/qwenpaw-remote.md)。
 
 WSL Chrome 与 QwenPaw 在同一 WSL 环境中时可直接使用上述 loopback 地址。
 不要直接将明文监听暴露到公网。远程使用必须自行部署 HTTPS 反向代理，
