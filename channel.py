@@ -14,6 +14,7 @@ from uuid import uuid4
 from aiohttp import web
 from qwenpaw.app.channels.base import BaseChannel
 from qwenpaw.app.channels.renderer import ChannelDisplayConfig
+from qwenpaw.config.config import load_agent_config_async
 from qwenpaw.schemas import MessageType, TextContent
 
 from .protocol import MAX_CONTEXT, MAX_TEXT, MessagePayload, NewConversation
@@ -229,10 +230,23 @@ class PageAssistChannel(BaseChannel):
             }
         )
 
+    async def _agent_name(self):
+        """Prefer the name configured in QwenPaw; fall back to the Agent id."""
+        try:
+            config = await load_agent_config_async(self.agent_id)
+            return (config.name or "").strip() or self.agent_id
+        except Exception:  # pylint: disable=broad-except
+            logger.warning(
+                "Could not read the configured name for Agent %s",
+                self.agent_id,
+                exc_info=True,
+            )
+            return self.agent_id
+
     async def _agents(self, request):
         return web.json_response(
             {
-                "agents": [{"id": self.agent_id, "name": self.agent_id}],
+                "agents": [{"id": self.agent_id, "name": await self._agent_name()}],
             }
         )
 

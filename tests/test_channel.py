@@ -10,7 +10,7 @@ import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import aiohttp
@@ -233,7 +233,19 @@ async def test_auth_scope_and_capabilities(service):
     caps = await response.json()
     assert caps["recovery"] is False and caps["approvals"] is False
     assert caps["maxContextChars"] == 30000
-    response = await service.client.get(service.prefix + "/agents")
+    with patch(
+        "_page_assist_test_plugin.channel.load_agent_config_async",
+        new=AsyncMock(return_value=SimpleNamespace(name="Research Agent")),
+    ):
+        response = await service.client.get(service.prefix + "/agents")
+    assert (await response.json())["agents"] == [
+        {"id": "test-agent", "name": "Research Agent"},
+    ]
+    with patch(
+        "_page_assist_test_plugin.channel.load_agent_config_async",
+        new=AsyncMock(side_effect=RuntimeError("config unavailable")),
+    ):
+        response = await service.client.get(service.prefix + "/agents")
     assert (await response.json())["agents"] == [
         {"id": "test-agent", "name": "test-agent"},
     ]
