@@ -5,7 +5,7 @@
 无需克隆或修改 QwenPaw 源码。宿主使用 pip 发布版；插件仍运行在宿主进程内。
 
 独立安装的单 Agent 频道插件。运行在 QwenPaw 进程内，自带一个 HTTP 监听端口；
-不修改核心、不部署 Bridge，也不调用 OpenAI-compatible 聊天接口绕过原生 Agent。
+不修改核心、不单独部署中继服务，也不调用 OpenAI-compatible 聊天接口绕过原生 Agent。
 它是 Page Assist **Remote Agent** Provider 的首个后端实现。版本组合：
 QwenPaw `2.2.2.post1`、Page Assist `remote-agent-preview-1`、本插件
 `remote-agent-preview-1`。界面 Provider 名为 Remote Agent；协议、存储键、路由和
