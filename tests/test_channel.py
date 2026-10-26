@@ -482,7 +482,8 @@ async def test_browser_approval_list_and_decision(service):
         f"{service.prefix}/conversations/{conversation}/messages"
     )
     contents = [m["content"] for m in (await response.json())["messages"]]
-    assert any("Native tool approval is required" in c for c in contents)
+    # Approvals surface through the composer button, never as chat messages.
+    assert not any("Native tool approval is required" in c for c in contents)
     assert "Approval outcome: approved" in contents
 
 
@@ -645,7 +646,14 @@ async def serve(port):
     stopped = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, stopped.set)
+        try:
+            loop.add_signal_handler(sig, stopped.set)
+        except NotImplementedError:
+            # Windows event loops reject add_signal_handler; fall back to
+            # signal.signal so the harness can stop the channel there too.
+            signal.signal(
+                sig, lambda *_: loop.call_soon_threadsafe(stopped.set)
+            )
     print("CHANNEL_TEST_READY", flush=True)
     try:
         await stopped.wait()

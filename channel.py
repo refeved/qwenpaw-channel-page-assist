@@ -697,22 +697,27 @@ class PageAssistChannel(BaseChannel):
         result_summary,
         channel_meta=None,
     ):
+        """Mark the request as pending; the panel polls the list.
+
+        No chat message is appended: the composer approval button is the
+        single surface, so the transcript holds only real conversation.
+        """
         conversation_id = session_id.removeprefix(f"{self.channel}:")
         conversation = self._conversations.get(conversation_id)
-        if conversation is None or conversation.active is None:
+        record = None
+        if conversation is not None and conversation.active is not None:
+            record = self._requests.get(conversation.active)
+        if record is None:
             logger.warning(
                 "Page Assist approval %s has no active browser request",
                 request_id,
             )
             return
-        record = self._requests.get(conversation.active)
-        if record is not None:
-            record.state = "waiting_approval"
-        await self.send(
-            conversation_id,
-            f"Native tool approval is required for {tool_name} "
-            f"(severity {severity}). Review it in the approval list of this "
-            f"panel; approval ID: {request_id}. Handle it in the trusted "
-            "QwenPaw Console if this panel cannot show it. This channel "
-            "never approves tools automatically.",
+        record.state = "waiting_approval"
+        logger.info(
+            "Page Assist approval %s pending for %s (severity %s): %s",
+            request_id[:8],
+            tool_name,
+            severity,
+            result_summary.strip()[:120] or "no summary",
         )
