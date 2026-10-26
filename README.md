@@ -21,8 +21,9 @@ Remote Agent；协议、存储键、路由和前端客户端仍沿用 `qwenpaw` 
   原生工具、记忆与权限策略不被替换。
 - 显示已完成的文本消息，不显示隐藏思考或工具参数。SSE 仅运输完整消息和状态，
   不实现逐 token 输出。
-- 原生审批仍然生效，但不提供浏览器审批卡片或批准 API。需要审批时另行打开
-  QwenPaw Console 的原生审批界面；插件不会自动批准、降级权限或绕过检查。
+- 原生审批在侧栏内联处理：直接复用 ApprovalService 的待审批记录与原生决定入口
+  （`exact` 始终可选，`similar` 仅在原生给出泛化目标时提供），不自动批准、
+  不降级权限、不绕过检查。归属无法确认或超出本版本的审批仍在 Console 处理。
 - Remote Agent 界面只保留文字聊天、显式网页／选区分享、当前实例内会话历史和
   新建会话。本地 RAG、联网搜索、MCP、提示词、临时聊天、逐会话模型参数、
   文件／图片上传、视觉／OCR、语音、Page Action 和 WebMCP 不提供或禁用；
@@ -31,7 +32,7 @@ Remote Agent；协议、存储键、路由和前端客户端仍沿用 `qwenpaw` 
   `chrome.storage.local.setAccessLevel`）；请使用 Chrome／Chromium。
 
 延期：全局多 Agent 发现、跨重启历史恢复、断线自动恢复、持久请求账本、
-取消按钮、富媒体、主动推送、审批卡片。不要依赖本版本作为生产远程网关。
+取消按钮、富媒体、主动推送、审批事件推送。不要依赖本版本作为生产远程网关。
 
 ## 安装与连接
 
@@ -46,6 +47,14 @@ qwenpaw plugin install /path/to/qwenpaw-channel-page-assist
 再重启宿主；安装目录是宿主管理的副本，不会随仓库编辑自动更新。
 不需要构建 QwenPaw Console，也不需要设置 `PYTHONPATH`。
 
+两条安装前提（实测于 QwenPaw 2.2.2.post1）：
+
+- 宿主用自身 Python 环境的 pip 安装 `requirements.txt`，该 pip 不得低于 `26.2.2`，
+  否则安装会在依赖步骤被判为不安全并整体回滚。
+- 安装源目录不要携带 `.git`：宿主整目录复制，Windows 下只读的 git object 会导致
+  复制阶段失败。可先把 `plugin.json`、`plugin.py`、`channel.py`、`protocol.py`、
+  `requirements.txt` 复制到空目录再安装。
+
 在 Console 中确认插件启用，选中目标 Agent，在频道管理中配置 **Page Assist**：
 
 | 配置 | 值 |
@@ -58,8 +67,9 @@ qwenpaw plugin install /path/to/qwenpaw-channel-page-assist
 可在 QwenPaw 的 Python 环境中用 `python -c "import secrets; print(secrets.token_urlsafe(32))"`
 生成随机密钥。不要将密钥写入仓库、日志或聊天。
 
-对应 Agent 配置中频道键为 `channels.page_assist`；插件界面保存的额外字段由原生
-ChannelManager 读取。不需要手工改全局 Agent 路由。
+频道配置只从 **Agent 级** 配置读取，即 `workspaces/<agent>/agent.json` 中的
+`channels.page_assist`；写在宿主全局 `config.json` 的同名键不会启动监听。用 Console
+或频道管理界面保存即可，不需要手工改全局 Agent 路由。
 
 首次安装或修改频道配置后重启 QwenPaw，检查日志出现
 `Page Assist channel listening on 127.0.0.1:8766`。
@@ -100,11 +110,16 @@ WSL Chrome 与 QwenPaw 在同一 WSL 环境中时可直接使用上述 loopback 
 
 浏览器路径保持 `/api/page-assist`。提供 capabilities、唯一 Agent、新建聊天、
 提交消息、会话内历史、请求状态及请求事件接口。接口载荷沿用前端 v1，声明
-`recovery=false`、`approvals=false`、`approvalEvents=false`。
+`recovery=false`、`approvals=true`、`approvalEvents=false`；待审批列表与决定走
+`GET /approvals` 与 `POST /approvals/{id}/decision`，前端每 5 秒轮询对账，
+不依赖推送。
 
 - 同一聊天一次一个请求，占用时返回 409，不进入消息合并队列。
 - 同实例内相同 requestId 与相同负载不会重跑；负载或聊天不同时返回 409。
 - 同时最多保留 100 个聊天、500 个请求；达到容量返回 429，不静默驱逐。
+- 待审批只暴露本频道实例、本浏览器凭据所拥有会话的记录；其他频道或其他实例的
+  审批不可见也不可决定。同一 `decisionId` 重复提交返回已确认结果，与已确认结果
+  冲突的决定返回 409，不覆盖原生结论。
 - 请求、网页负载和浏览器展示历史仅保存在内存。频道重新实例化后 instanceId
   改变，前端缓存自动分区；需要新建聊天，不能恢复旧的浏览器聊天。
 - 原生历史、记忆或工具副作用可能已持久保存，**不随频道内存清空而删除**。
