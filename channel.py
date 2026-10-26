@@ -7,21 +7,41 @@ import hashlib
 import hmac
 import json
 import logging
+import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
 from aiohttp import web
+from qwenpaw.app.approvals import (
+    ApprovalActor,
+    ApprovalIdentityMismatchError,
+    get_approval_service,
+)
+from qwenpaw.app.approvals.display import approval_display_fields
 from qwenpaw.app.channels.base import BaseChannel
 from qwenpaw.app.channels.renderer import ChannelDisplayConfig
 from qwenpaw.config.config import load_agent_config_async
 from qwenpaw.schemas import MessageType, TextContent
+from qwenpaw.security.tool_guard.approval import (
+    ApprovalDecision,
+    ApprovalScope,
+)
 
-from .protocol import MAX_CONTEXT, MAX_TEXT, MessagePayload, NewConversation
+from .protocol import (
+    MAX_CONTEXT,
+    MAX_TEXT,
+    ApprovalDecisionPayload,
+    MessagePayload,
+    NewConversation,
+)
 
 logger = logging.getLogger(__name__)
 PREFIX = "/api/page-assist"
 TERMINAL = {"completed", "failed", "cancelled"}
+APPROVAL_TARGET_MAX = 2000
+DECISIONS_MAX = 200
 
 
 @dataclass
@@ -82,6 +102,7 @@ class PageAssistChannel(BaseChannel):
         self._user = hashlib.sha256(browser_token.encode()).hexdigest()
         self._conversations: dict[str, Conversation] = {}
         self._requests: dict[str, Request] = {}
+        self._decisions: dict[str, dict[str, Any]] = {}
         self._runner: web.AppRunner | None = None
         self._stopping = False
 
@@ -154,6 +175,10 @@ class PageAssistChannel(BaseChannel):
                 ),
                 web.get(f"{PREFIX}/requests/{{id}}", self._request),
                 web.get(f"{PREFIX}/requests/{{id}}/events", self._events),
+                web.get(f"{PREFIX}/approvals", self._approvals),
+                web.post(
+                    f"{PREFIX}/approvals/{{id}}/decision", self._decide
+                ),
             ]
         )
         runner = web.AppRunner(app, shutdown_timeout=2)
@@ -225,7 +250,7 @@ class PageAssistChannel(BaseChannel):
                 "maxContextChars": MAX_CONTEXT,
                 "maxTextChars": MAX_TEXT,
                 "recovery": False,
-                "approvals": False,
+                "approvals": True,
                 "approvalEvents": False,
             }
         )
@@ -386,6 +411,189 @@ class PageAssistChannel(BaseChannel):
             )
         return response
 
+    def _approval_conversation(self, pending):
+        """Return the browser conversation owning *pending*, if any.
+
+        Only approvals raised by this channel instance and this browser
+        credential are visible; anything else stays with its own surface.
+        """
+        if pending.channel != self.channel or pending.user_id != self._user:
+            return None
+        prefix = f"{self.channel}:"
+        for session_id in (pending.session_id, pending.root_session_id):
+            if not session_id.startswith(prefix):
+                continue
+            conversation = self._conversations.get(session_id[len(prefix) :])
+            if conversation is not None:
+                return conversation
+        return None
+
+    @staticmethod
+    def _approval_target(pending, display):
+        """Show the native target; never a model-written summary."""
+        target = str(display.get("exact_target") or "").strip()
+        if target:
+            return target[:APPROVAL_TARGET_MAX]
+        tool_call = pending.extra.get("tool_call")
+        params = None
+        if isinstance(tool_call, dict):
+            params = tool_call.get("input")
+        if isinstance(params, dict) and params:
+            detail = json.dumps(params, ensure_ascii=False, sort_keys=True)
+            return f"{pending.tool_name} {detail}"[:APPROVAL_TARGET_MAX]
+        return pending.tool_name or "Tool"
+
+    def _approval_dto(self, pending):
+        conversation = self._approval_conversation(pending)
+        if conversation is None or conversation.active is None:
+            return None
+        display = approval_display_fields(pending)
+        expires_at = pending.created_at + pending.timeout_seconds
+        # The side panel renders "Approve — {label}", so labels stay short
+        # and only name the scope, matching Console wording.
+        scopes = [
+            {
+                "id": ApprovalScope.EXACT.value,
+                "label": "Exact target",
+                "description": "Run this tool call once with the target shown "
+                "above. Native policy may remember the literal target, so "
+                "this is not a one-off promise.",
+            }
+        ]
+        if display.get("is_generalized"):
+            scopes.append(
+                {
+                    "id": ApprovalScope.SIMILAR.value,
+                    "label": "Similar pattern",
+                    "description": "Allow this and later calls matching the "
+                    "generalized target.",
+                }
+            )
+        risk = pending.result_summary.strip() or f"Severity {pending.severity}"
+        return {
+            "id": pending.request_id,
+            "conversationId": conversation.id,
+            "agentId": pending.agent_id,
+            "requestId": conversation.active,
+            "tool": display.get("tool_display_name") or pending.tool_name,
+            "target": self._approval_target(pending, display),
+            "risk": risk,
+            "expiresAt": datetime.fromtimestamp(
+                expires_at,
+                timezone.utc,
+            ).isoformat(),
+            "actionable": (
+                pending.status == "pending" and time.time() < expires_at
+            ),
+            "scopes": scopes,
+        }
+
+    async def _approvals(self, request):
+        service = get_approval_service()
+        # pylint: disable=protected-access
+        async with service._lock:
+            pending = list(service._pending.values())
+        approvals = [
+            dto
+            for dto in (self._approval_dto(item) for item in pending)
+            if dto is not None
+        ]
+        return web.json_response({"approvals": approvals})
+
+    async def _decide(self, request):
+        approval_id = request.match_info["id"]
+        payload = await self._body(request, ApprovalDecisionPayload)
+        previous = self._decisions.get(approval_id)
+        if previous is not None:
+            if previous["payload"] != payload.model_dump():
+                raise web.HTTPConflict(
+                    text="A different decision was already confirmed"
+                )
+            return web.json_response(previous["response"])
+
+        service = get_approval_service()
+        pending = await service.get_request(approval_id)
+        if pending is None:
+            raise web.HTTPNotFound(text="Approval is no longer pending")
+        conversation = self._approval_conversation(pending)
+        if conversation is None:
+            raise web.HTTPNotFound(
+                text="Approval does not belong to this browser channel"
+            )
+        expires_at = pending.created_at + pending.timeout_seconds
+        if pending.status != "pending" or time.time() >= expires_at:
+            raise web.HTTPConflict(text="Approval already resolved or expired")
+
+        scope = None
+        if payload.approved:
+            try:
+                scope = ApprovalScope(
+                    payload.scope or ApprovalScope.EXACT.value
+                )
+            except ValueError:
+                raise web.HTTPBadRequest(
+                    text="Unsupported approval scope"
+                ) from None
+            if (
+                scope is ApprovalScope.SIMILAR
+                and not approval_display_fields(pending).get("is_generalized")
+            ):
+                raise web.HTTPBadRequest(
+                    text="This approval has no generalized scope"
+                )
+
+        # This instance only serves the sessions owned by its browser
+        # credential, so the actor mirrors the native request instead of
+        # claiming Console administrator rights.
+        actor = ApprovalActor(
+            session_id=pending.session_id,
+            root_session_id=pending.root_session_id,
+            user_id=pending.user_id,
+            channel=pending.channel,
+            agent_id=pending.agent_id,
+        )
+        try:
+            resolved = await service.resolve_request(
+                approval_id,
+                ApprovalDecision.APPROVED
+                if payload.approved
+                else ApprovalDecision.DENIED,
+                scope=scope,
+                actor=actor,
+            )
+        except ApprovalIdentityMismatchError:
+            raise web.HTTPForbidden(
+                text="Approval caller does not own this request"
+            ) from None
+        if resolved is None:
+            raise web.HTTPConflict(text="Approval already resolved or expired")
+
+        response = {
+            "approvalId": approval_id,
+            "decisionId": payload.decisionId,
+            "approved": payload.approved,
+            "status": "confirmed",
+        }
+        if scope is not None:
+            response["scope"] = scope.value
+        self._decisions[approval_id] = {
+            "payload": payload.model_dump(),
+            "response": response,
+        }
+        while len(self._decisions) > DECISIONS_MAX:
+            self._decisions.pop(next(iter(self._decisions)))
+        if conversation.active is not None:
+            record = self._requests.get(conversation.active)
+            if record is not None and record.state == "waiting_approval":
+                record.state = "running"
+        logger.info(
+            "Page Assist approval %s resolved: approved=%s scope=%s",
+            approval_id[:8],
+            payload.approved,
+            scope.value if scope else "none",
+        )
+        return web.json_response(response)
+
     def get_to_handle_from_request(self, request):
         return request.session_id.removeprefix(f"{self.channel}:")
 
@@ -490,15 +698,21 @@ class PageAssistChannel(BaseChannel):
         channel_meta=None,
     ):
         conversation_id = session_id.removeprefix(f"{self.channel}:")
-        conversation = self._conversations[conversation_id]
-        if conversation.active is None:
-            raise RuntimeError(
-                "Approval notification has no active browser request"
+        conversation = self._conversations.get(conversation_id)
+        if conversation is None or conversation.active is None:
+            logger.warning(
+                "Page Assist approval %s has no active browser request",
+                request_id,
             )
-        self._requests[conversation.active].state = "waiting_approval"
+            return
+        record = self._requests.get(conversation.active)
+        if record is not None:
+            record.state = "waiting_approval"
         await self.send(
             conversation_id,
-            "Native tool approval is required. Open the QwenPaw Console to "
-            f"review it. Tool: {tool_name}; approval ID: {request_id}. "
-            "This browser channel never approves tools automatically.",
+            f"Native tool approval is required for {tool_name} "
+            f"(severity {severity}). Review it in the approval list of this "
+            f"panel; approval ID: {request_id}. Handle it in the trusted "
+            "QwenPaw Console if this panel cannot show it. This channel "
+            "never approves tools automatically.",
         )

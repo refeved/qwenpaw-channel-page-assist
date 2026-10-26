@@ -64,6 +64,25 @@ class PageContext(Payload):
         return self
 
 
+class ApprovalDecisionPayload(Payload):
+    decisionId: str
+    approved: bool
+    scope: str | None = None
+
+    @field_validator("decisionId")
+    @classmethod
+    def validate_decision_id(cls, value):
+        UUID(value)
+        return value
+
+    @field_validator("scope")
+    @classmethod
+    def validate_scope(cls, value):
+        if value is not None and value not in {"exact", "similar"}:
+            raise ValueError("Unsupported approval scope")
+        return value
+
+
 class MessagePayload(Payload):
     requestId: str
     text: str
