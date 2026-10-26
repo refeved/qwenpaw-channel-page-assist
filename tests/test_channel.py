@@ -8,6 +8,7 @@ import os
 import signal
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -71,15 +72,50 @@ def make_channel(port):
         if text == "error":
             raise RuntimeError("deterministic provider failure")
         if text == "approval":
-            await channel.send_approval_notification(
-                session_id=request.session_id,
-                user_id=request.user_id,
-                request_id="native-approval-test",
-                tool_name="test_tool",
-                severity="high",
-                result_summary="not browser-approved",
+            from qwenpaw.app.approvals import (
+                ApprovalRequestSummary,
+                get_approval_service,
             )
-            await gates.setdefault(request.session_id, asyncio.Event()).wait()
+
+            approvals = get_approval_service()
+            pending = await approvals.create_pending_summary(
+                session_id=request.session_id,
+                root_session_id=request.session_id,
+                owner_agent_id="test-agent",
+                user_id=request.user_id,
+                channel=channel.channel,
+                agent_id="test-agent",
+                summary=ApprovalRequestSummary(
+                    source_type="tool_guard",
+                    name="shell",
+                    severity="high",
+                    result_summary="Writes outside the workspace",
+                    payload={
+                        "display": {
+                            "tool_name": "shell",
+                            "exact_target": "rm -rf build",
+                            "similar_target": "rm -rf *",
+                            "is_generalized": True,
+                        }
+                    },
+                ),
+                extra={"_channel_instance": channel},
+                timeout_seconds=30,
+            )
+            decision = await approvals.wait_for_approval(
+                pending,
+                timeout_seconds=10,
+            )
+            yield Event(
+                object="message",
+                type=MessageType.MESSAGE,
+                status=RunStatus.Completed,
+                content=[
+                    TextContent(text=f"Approval outcome: {decision.value}")
+                ],
+            )
+            yield Event(object="response", status=RunStatus.Completed)
+            return
         count = remembered.get(request.session_id, 0) + 1
         remembered[request.session_id] = count
         yield Event(
@@ -172,6 +208,12 @@ async def wait_done(service, request_id):
             await asyncio.sleep(0.01)
 
 
+async def wait_state(service, request_id, expected):
+    async with asyncio.timeout(5):
+        while service.channel._requests[request_id].state != expected:
+            await asyncio.sleep(0.01)
+
+
 @pytest.mark.asyncio
 async def test_native_chat_and_follow_up(service):
     dispatches = []
@@ -231,7 +273,8 @@ async def test_auth_scope_and_capabilities(service):
         assert response.status == 401
     response = await service.client.get(service.prefix + "/capabilities")
     caps = await response.json()
-    assert caps["recovery"] is False and caps["approvals"] is False
+    assert caps["recovery"] is False
+    assert caps["approvals"] is True and caps["approvalEvents"] is False
     assert caps["maxContextChars"] == 30000
     with patch(
         "_page_assist_test_plugin.channel.load_agent_config_async",
@@ -365,21 +408,155 @@ async def test_errors_are_not_success(service):
 async def test_approval_waits_for_native_action_and_stop_cleans_tasks(service):
     conversation = await create(service)
     payload = await submit(service, conversation, "approval")
-    async with asyncio.timeout(5):
-        while (
-            service.channel._requests[payload["requestId"]].state
-            != "waiting_approval"
-        ):
-            await asyncio.sleep(0.01)
+    await wait_state(service, payload["requestId"], "waiting_approval")
     assert await service.channel._workspace.task_tracker.has_active_tasks()
     response = await service.client.post(
-        f"{service.prefix}/approvals/native-approval-test/decision",
-        json={"approved": True},
+        f"{service.prefix}/approvals/{uuid4()}/decision",
+        json={"decisionId": str(uuid4()), "approved": True, "scope": "exact"},
     )
     assert response.status == 404
     await service.channel.stop()
     assert not await service.channel._workspace.task_tracker.has_active_tasks()
     assert service.channel._requests[payload["requestId"]].state == "cancelled"
+    # Leave no unresolved native approval behind for later tests.
+    from qwenpaw.app.approvals import get_approval_service
+    from qwenpaw.security.tool_guard.approval import ApprovalDecision
+
+    for pending in await get_approval_service().get_all_pending_by_session(
+        service.calls[0].session_id
+    ):
+        await get_approval_service().resolve_request(
+            pending.request_id, ApprovalDecision.TIMEOUT
+        )
+
+
+@pytest.mark.asyncio
+async def test_browser_approval_list_and_decision(service):
+    conversation = await create(service)
+    payload = await submit(service, conversation, "approval")
+    await wait_state(service, payload["requestId"], "waiting_approval")
+
+    response = await service.client.get(f"{service.prefix}/approvals")
+    rows = (await response.json())["approvals"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["conversationId"] == conversation
+    assert row["agentId"] == "test-agent"
+    assert row["requestId"] == payload["requestId"]
+    assert row["tool"] == "shell"
+    assert row["target"] == "rm -rf build"
+    assert row["risk"] == "Writes outside the workspace"
+    assert row["actionable"] is True
+    assert [scope["id"] for scope in row["scopes"]] == ["exact", "similar"]
+    # The panel renders "Approve — {label}", so labels only name the scope.
+    assert [scope["label"] for scope in row["scopes"]] == [
+        "Exact target",
+        "Similar pattern",
+    ]
+    assert all(scope["description"] for scope in row["scopes"])
+    expires_at = datetime.fromisoformat(row["expiresAt"])
+    assert expires_at > datetime.now(timezone.utc)
+
+    path = f"{service.prefix}/approvals/{row['id']}/decision"
+    decision = {"decisionId": str(uuid4()), "approved": True, "scope": "exact"}
+    response = await service.client.post(path, json=decision)
+    assert response.status == 200
+    assert await response.json() == {
+        "approvalId": row["id"],
+        "decisionId": decision["decisionId"],
+        "approved": True,
+        "scope": "exact",
+        "status": "confirmed",
+    }
+    response = await service.client.post(path, json=decision)
+    assert response.status == 200
+    response = await service.client.post(
+        path, json={**decision, "approved": False}
+    )
+    assert response.status == 409
+
+    assert await wait_done(service, payload["requestId"]) == "completed"
+    response = await service.client.get(f"{service.prefix}/approvals")
+    assert (await response.json())["approvals"] == []
+    response = await service.client.get(
+        f"{service.prefix}/conversations/{conversation}/messages"
+    )
+    contents = [m["content"] for m in (await response.json())["messages"]]
+    assert any("Native tool approval is required" in c for c in contents)
+    assert "Approval outcome: approved" in contents
+
+
+@pytest.mark.asyncio
+async def test_approval_ownership_deny_and_scope_guards(service):
+    from qwenpaw.app.approvals import (
+        ApprovalRequestSummary,
+        get_approval_service,
+    )
+    from qwenpaw.security.tool_guard.approval import ApprovalDecision
+
+    conversation = await create(service)
+    payload = await submit(service, conversation, "wait")
+    async with asyncio.timeout(5):
+        while not service.calls:
+            await asyncio.sleep(0.01)
+    session_id = service.calls[0].session_id
+    approvals = get_approval_service()
+
+    async def raise_pending(channel, session, summary):
+        return await approvals.create_pending_summary(
+            session_id=session,
+            root_session_id=session,
+            owner_agent_id="test-agent",
+            user_id=service.channel._user,
+            channel=channel,
+            agent_id="test-agent",
+            summary=ApprovalRequestSummary(
+                source_type="tool_guard",
+                name="shell",
+                severity="medium",
+                result_summary=summary,
+            ),
+            timeout_seconds=30,
+        )
+
+    own = await raise_pending("page_assist", session_id, "Reads a secret")
+    elsewhere = await raise_pending("telegram", session_id, "Other channel")
+    unknown = await raise_pending("page_assist", "page_assist:missing", "Gone")
+
+    response = await service.client.get(f"{service.prefix}/approvals")
+    rows = (await response.json())["approvals"]
+    assert [row["id"] for row in rows] == [own.request_id]
+    assert rows[0]["requestId"] == payload["requestId"]
+    assert rows[0]["target"] == "shell"
+    assert rows[0]["risk"] == "Reads a secret"
+    assert [scope["id"] for scope in rows[0]["scopes"]] == ["exact"]
+
+    path = f"{service.prefix}/approvals/{own.request_id}/decision"
+    similar = {
+        "decisionId": str(uuid4()),
+        "approved": True,
+        "scope": "similar",
+    }
+    response = await service.client.post(path, json=similar)
+    assert response.status == 400
+    for foreign in (elsewhere, unknown):
+        response = await service.client.post(
+            f"{service.prefix}/approvals/{foreign.request_id}/decision",
+            json={"decisionId": str(uuid4()), "approved": False},
+        )
+        assert response.status == 404
+    response = await service.client.post(
+        path, json={"decisionId": str(uuid4()), "approved": False}
+    )
+    assert response.status == 200
+    assert await approvals.get_request(own.request_id) is None
+
+    for foreign in (elsewhere, unknown):
+        await approvals.resolve_request(
+            foreign.request_id, ApprovalDecision.DENIED
+        )
+    service.gates[session_id].set()
+    assert await wait_done(service, payload["requestId"]) == "completed"
 
 
 @pytest.mark.asyncio
