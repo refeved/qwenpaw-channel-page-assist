@@ -26,10 +26,11 @@ Remote Agent；协议、存储键、路由和前端客户端仍沿用 `qwenpaw` 
   不降级权限、不绕过检查。归属无法确认或超出本版本的审批仍在 Console 处理。
   待审批不写入对话消息：输入框旁按钮在无待审批时置灰，有待审批时高亮并弹出
   气泡，任务进入 `waiting_approval` 只由状态与轮询体现。
-- Remote Agent 界面提供文字聊天、显式网页／选区分享、图片／文件附件（需新版
-  扩展配合）、当前实例内会话历史和新建会话；语音输入、TTS 朗读与提示词插入
+- Remote Agent 界面提供文字聊天、显式网页／选区分享、图片／文件／网页截图附件
+  （需新版扩展配合；截图由扩展在本地捕获可见标签页后走同一上传通道）、当前实例内
+  会话历史和新建会话；语音输入、TTS 朗读与提示词插入
   由浏览器本地完成。本地 RAG、联网搜索、MCP、临时聊天、逐会话模型参数、
-  视觉／OCR、Page Action 和 WebMCP 不提供或禁用；
+  OCR、Page Action 和 WebMCP 不提供或禁用；
   未接通入口会说明原因。
 - Firefox 版本不显示 Remote Agent 入口（MV2 缺少
   `chrome.storage.local.setAccessLevel`）；请使用 Chrome／Chromium。
