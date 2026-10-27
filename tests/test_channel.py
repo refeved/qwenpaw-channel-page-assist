@@ -1,6 +1,7 @@
 """Real HTTP and native channel execution with a deterministic Agent stub."""
 
 import asyncio
+import base64
 import hashlib
 import importlib.util
 import json
@@ -55,7 +56,7 @@ class MemoryChats:
         pass
 
 
-def make_channel(port):
+def make_channel(port, workspace_dir=None):
     from qwenpaw.app.task_tracker import TaskTracker
     from qwenpaw.schemas import Event, MessageType, RunStatus, TextContent
 
@@ -148,6 +149,7 @@ def make_channel(port):
             agent_id="test-agent",
             chat_manager=MemoryChats(),
             task_tracker=TaskTracker(),
+            workspace_dir=workspace_dir,
         ),
         SimpleNamespace(is_control_command=lambda text: False),
     )
@@ -158,7 +160,9 @@ def make_channel(port):
 async def service(unused_tcp_port, monkeypatch, tmp_path):
     # Isolate config before the first native import.
     monkeypatch.setenv("QWENPAW_WORKING_DIR", str(tmp_path))
-    channel, calls, gates = make_channel(unused_tcp_port)
+    channel, calls, gates = make_channel(
+        unused_tcp_port, tmp_path / "workspace"
+    )
     await channel.start()
     headers = {"Authorization": f"Bearer {TOKEN}"}
     async with aiohttp.ClientSession(
@@ -275,6 +279,7 @@ async def test_auth_scope_and_capabilities(service):
     caps = await response.json()
     assert caps["recovery"] is False
     assert caps["approvals"] is True and caps["approvalEvents"] is False
+    assert caps["attachments"] is True and caps["maxAttachments"] == 4
     assert caps["maxContextChars"] == 30000
     with patch(
         "_page_assist_test_plugin.channel.load_agent_config_async",
@@ -625,6 +630,135 @@ async def test_exact_limits_and_capacity(service):
     )
     assert response.status == 429
     assert len(service.calls) == 1
+
+
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"pixel" * 8
+PDF_BYTES = b"%PDF-1.4 deterministic fake body"
+
+
+async def upload(service, name, data, media_type=""):
+    response = await service.client.post(
+        service.prefix + "/attachments",
+        json={
+            "name": name,
+            "mediaType": media_type,
+            "data": base64.b64encode(data).decode(),
+        },
+    )
+    return response
+
+
+@pytest.mark.asyncio
+async def test_attachments_reach_the_agent_as_file_contents(service, tmp_path):
+    media = tmp_path / "workspace" / "media" / "page_assist"
+    image = await upload(service, "../../evil:pic.png", PNG_BYTES, "image/png")
+    assert image.status == 201
+    image_body = await image.json()
+    assert image_body["name"] == "evil_pic.png"
+    assert image_body["kind"] == "image"
+    assert image_body["mediaType"] == "image/png"
+    document = await upload(
+        service, "report.pdf", PDF_BYTES, "application/pdf"
+    )
+    assert document.status == 201
+    document_body = await document.json()
+    assert document_body["kind"] == "file"
+    assert (media / f"{image_body['attachmentId']}.png").read_bytes() == (
+        PNG_BYTES
+    )
+    conversation = await create(service)
+    payload = {
+        "requestId": str(uuid4()),
+        "text": "look at these",
+        "attachments": [
+            {"attachmentId": image_body["attachmentId"]},
+            {"attachmentId": document_body["attachmentId"]},
+        ],
+    }
+    response = await service.client.post(
+        f"{service.prefix}/conversations/{conversation}/messages",
+        json=payload,
+    )
+    assert response.status == 202, await response.text()
+    assert await wait_done(service, payload["requestId"]) == "completed"
+    contents = service.calls[-1].input[0].content
+    assert contents[0].text == "look at these"
+    assert (
+        contents[1].image_url
+        == (media / f"{image_body['attachmentId']}.png").resolve().as_uri()
+    )
+    assert (
+        contents[2].file_url
+        == (media / f"{document_body['attachmentId']}.pdf").resolve().as_uri()
+    )
+    assert contents[2].filename == "report.pdf"
+    response = await service.client.get(
+        f"{service.prefix}/conversations/{conversation}/messages",
+    )
+    history = await response.json()
+    user_text = history["messages"][0]["content"]
+    assert "[attachment image: evil_pic.png]" in user_text
+    assert "[attachment file: report.pdf]" in user_text
+    # A consumed attachment can never ride a second request.
+    response = await service.client.post(
+        f"{service.prefix}/conversations/{conversation}/messages",
+        json={
+            "requestId": str(uuid4()),
+            "text": "reuse",
+            "attachments": [
+                {"attachmentId": image_body["attachmentId"]}
+            ],
+        },
+    )
+    assert response.status == 400
+    # An unknown id is rejected the same way.
+    response = await service.client.post(
+        f"{service.prefix}/conversations/{conversation}/messages",
+        json={
+            "requestId": str(uuid4()),
+            "text": "ghost",
+            "attachments": [{"attachmentId": str(uuid4())}],
+        },
+    )
+    assert response.status == 400
+
+
+@pytest.mark.asyncio
+async def test_attachment_upload_validation(service):
+    response = await upload(service, "empty.png", b"")
+    assert response.status == 400
+    response = await service.client.post(
+        service.prefix + "/attachments",
+        json={"name": "x.png", "mediaType": "", "data": "not!!base64"},
+    )
+    assert response.status == 400
+    oversized = base64.b64encode(
+        b"a" * (5 * 1024 * 1024 + 1)
+    ).decode()
+    response = await service.client.post(
+        service.prefix + "/attachments",
+        json={"name": "big.bin", "mediaType": "", "data": oversized},
+    )
+    assert response.status == 400
+    response = await upload(service, " ", PNG_BYTES)
+    assert response.status == 400
+    # More than four references fail validation before anything claims them.
+    conversation = await create(service)
+    uploaded = await upload(service, "one.png", PNG_BYTES)
+    uploaded_id = (await uploaded.json())["attachmentId"]
+    response = await service.client.post(
+        f"{service.prefix}/conversations/{conversation}/messages",
+        json={
+            "requestId": str(uuid4()),
+            "text": "too many",
+            "attachments": [{"attachmentId": uploaded_id}]
+            + [{"attachmentId": str(uuid4())} for _ in range(4)],
+        },
+    )
+    assert response.status == 400
+    assert uploaded_id not in {
+        a.id for a in service.channel._attachments.values() if a.used_by
+    }
 
 
 def test_manifest_and_offline_install_validation():

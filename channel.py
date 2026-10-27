@@ -7,9 +7,11 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -23,16 +25,26 @@ from qwenpaw.app.approvals.display import approval_display_fields
 from qwenpaw.app.channels.base import BaseChannel
 from qwenpaw.app.channels.renderer import ChannelDisplayConfig
 from qwenpaw.config.config import load_agent_config_async
-from qwenpaw.schemas import MessageType, TextContent
+from qwenpaw.constant import DEFAULT_MEDIA_DIR
+from qwenpaw.schemas import (
+    ContentType,
+    FileContent,
+    ImageContent,
+    MessageType,
+    TextContent,
+)
 from qwenpaw.security.tool_guard.approval import (
     ApprovalDecision,
     ApprovalScope,
 )
 
 from .protocol import (
+    MAX_ATTACHMENTS,
+    MAX_ATTACHMENT_BYTES,
     MAX_CONTEXT,
     MAX_TEXT,
     ApprovalDecisionPayload,
+    AttachmentUpload,
     MessagePayload,
     NewConversation,
 )
@@ -42,6 +54,40 @@ PREFIX = "/api/page-assist"
 TERMINAL = {"completed", "failed", "cancelled"}
 APPROVAL_TARGET_MAX = 2000
 DECISIONS_MAX = 200
+PENDING_ATTACHMENTS_MAX = 32
+MAX_UPLOAD_BODY = 8 * 1024 * 1024
+
+IMAGE_MAGIC = (
+    (b"\x89PNG\r\n\x1a\n", ".png", "image/png"),
+    (b"\xff\xd8\xff", ".jpg", "image/jpeg"),
+    (b"GIF87a", ".gif", "image/gif"),
+    (b"GIF89a", ".gif", "image/gif"),
+    (b"BM", ".bmp", "image/bmp"),
+)
+
+
+def classify_image(raw: bytes) -> tuple[str | None, str | None]:
+    """Return (extension, media type) when magic bytes prove a real image."""
+    for prefix, extension, media_type in IMAGE_MAGIC:
+        if raw.startswith(prefix):
+            return extension, media_type
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return ".webp", "image/webp"
+    return None, None
+
+
+def sanitize_name(name: str) -> str:
+    """Keep a displayable basename; path parts and control bytes are dropped."""
+    base = name.replace("\\", "/").rsplit("/", 1)[-1]
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", base).strip().strip(".")
+    return cleaned[:120] or "attachment"
+
+
+def safe_suffix(name: str) -> str:
+    suffix = Path(name).suffix
+    if re.fullmatch(r"\.[A-Za-z0-9]{1,8}", suffix or ""):
+        return suffix.lower()
+    return ""
 
 
 @dataclass
@@ -49,6 +95,17 @@ class Conversation:
     id: str
     messages: list[dict[str, Any]] = field(default_factory=list)
     active: str | None = None
+
+
+@dataclass
+class AttachmentRecord:
+    id: str
+    name: str
+    kind: str
+    media_type: str
+    bytes: int
+    path: Path
+    used_by: str | None = None
 
 
 @dataclass
@@ -102,6 +159,7 @@ class PageAssistChannel(BaseChannel):
         self._user = hashlib.sha256(browser_token.encode()).hexdigest()
         self._conversations: dict[str, Conversation] = {}
         self._requests: dict[str, Request] = {}
+        self._attachments: dict[str, AttachmentRecord] = {}
         self._decisions: dict[str, dict[str, Any]] = {}
         self._runner: web.AppRunner | None = None
         self._stopping = False
@@ -160,7 +218,7 @@ class PageAssistChannel(BaseChannel):
         self._stopping = False
         app = web.Application(
             middlewares=[self._authenticate],
-            client_max_size=256 * 1024,
+            client_max_size=MAX_UPLOAD_BODY,
         )
         app.add_routes(
             [
@@ -179,6 +237,7 @@ class PageAssistChannel(BaseChannel):
                 web.post(
                     f"{PREFIX}/approvals/{{id}}/decision", self._decide
                 ),
+                web.post(f"{PREFIX}/attachments", self._upload_attachment),
             ]
         )
         runner = web.AppRunner(app, shutdown_timeout=2)
@@ -252,6 +311,9 @@ class PageAssistChannel(BaseChannel):
                 "recovery": False,
                 "approvals": True,
                 "approvalEvents": False,
+                "attachments": True,
+                "maxAttachmentBytes": MAX_ATTACHMENT_BYTES,
+                "maxAttachments": MAX_ATTACHMENTS,
             }
         )
 
@@ -332,6 +394,7 @@ class PageAssistChannel(BaseChannel):
                 text="Channel request limit reached; "
                 "restart to clear browser state"
             )
+        attachments = self._claim_attachments(payload)
         record = Request(payload, conversation)
         self._requests[payload.requestId] = record
         conversation.active = payload.requestId
@@ -340,12 +403,98 @@ class PageAssistChannel(BaseChannel):
                 "id": f"{payload.requestId}:user",
                 "requestId": payload.requestId,
                 "role": "user",
-                "content": payload.text,
+                "content": self._user_message_text(payload, attachments),
                 "status": "complete",
             }
         )
         record.task = asyncio.create_task(self._execute(record))
         return web.json_response(record.dto(), status=202)
+
+    def _claim_attachments(
+        self, payload: MessagePayload
+    ) -> list[AttachmentRecord]:
+        """Mark every referenced upload as used by this requestId, once.
+
+        Checks and claims run without an await in between, so two concurrent
+        submits can never consume the same attachment. Any later failure of
+        the request leaves the claim dropped (the record simply expires with
+        the channel), which is safe: the browser re-uploads on retry.
+        """
+        claimed = []
+        for ref in payload.attachments or []:
+            attachment = self._attachments.get(ref.attachmentId)
+            if (
+                attachment is None
+                or attachment.used_by is not None
+                or not attachment.path.is_file()
+            ):
+                for record in claimed:
+                    record.used_by = None
+                raise web.HTTPBadRequest(
+                    text="Attachment unavailable; upload it again"
+                )
+            claimed.append(attachment)
+        for attachment in claimed:
+            attachment.used_by = payload.requestId
+        return claimed
+
+    @staticmethod
+    def _user_message_text(payload, attachments) -> str:
+        """History line for the browser; media itself lives on disk."""
+        if not attachments:
+            return payload.text
+        notes = "\n".join(
+            f"[attachment {a.kind}: {a.name}]" for a in attachments
+        )
+        return f"{payload.text}\n{notes}"
+
+    def _media_dir(self) -> Path:
+        """Workspace media dir, mirroring the official channels."""
+        workspace_dir = (
+            getattr(self._workspace, "workspace_dir", None)
+            if self._workspace
+            else None
+        )
+        base = (
+            Path(workspace_dir) / "media" / "page_assist"
+            if workspace_dir
+            else DEFAULT_MEDIA_DIR / "page_assist"
+        )
+        base.mkdir(parents=True, exist_ok=True)
+        return base
+
+    async def _upload_attachment(self, request):
+        body = await self._body(request, AttachmentUpload)
+        if len(self._attachments) >= PENDING_ATTACHMENTS_MAX:
+            raise web.HTTPTooManyRequests(
+                text="Too many unattached uploads; send or restart the channel"
+            )
+        raw = body.raw()
+        image_ext, image_mime = classify_image(raw)
+        name = sanitize_name(body.name)
+        suffix = safe_suffix(name) or (image_ext or "")
+        attachment_id = str(uuid4())
+        path = self._media_dir() / f"{attachment_id}{suffix}"
+        path.write_bytes(raw)
+        media_type = image_mime or body.mediaType or "application/octet-stream"
+        self._attachments[attachment_id] = AttachmentRecord(
+            id=attachment_id,
+            name=name,
+            kind="image" if image_ext else "file",
+            media_type=media_type,
+            bytes=len(raw),
+            path=path,
+        )
+        return web.json_response(
+            {
+                "attachmentId": attachment_id,
+                "name": name,
+                "kind": self._attachments[attachment_id].kind,
+                "mediaType": media_type,
+                "bytes": len(raw),
+            },
+            status=201,
+        )
 
     async def _history(self, request):
         conversation = self._conversation(request)
@@ -600,6 +749,28 @@ class PageAssistChannel(BaseChannel):
     def get_on_reply_sent_args(self, request, to_handle):
         return request.user_id, request.session_id
 
+    def _content_parts(self, record):
+        """Agent content list: text first, uploads as local file URIs."""
+        parts = [TextContent(text=record.payload.agent_text())]
+        for ref in record.payload.attachments or []:
+            attachment = self._attachments.get(ref.attachmentId)
+            if attachment is None:  # channel restarted; text still runs
+                continue
+            uri = attachment.path.resolve().as_uri()
+            if attachment.kind == "image":
+                parts.append(
+                    ImageContent(type=ContentType.IMAGE, image_url=uri)
+                )
+            else:
+                parts.append(
+                    FileContent(
+                        type=ContentType.FILE,
+                        file_url=uri,
+                        filename=attachment.name,
+                    )
+                )
+        return parts
+
     async def _execute(self, record):
         record.state = "running"
         try:
@@ -607,7 +778,7 @@ class PageAssistChannel(BaseChannel):
                 self.channel,
                 self._user,
                 f"{self.channel}:{record.conversation.id}",
-                [TextContent(text=record.payload.agent_text())],
+                self._content_parts(record),
             )
             request.channel_meta = {"conversation_id": record.conversation.id}
             request.channel_instance = self

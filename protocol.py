@@ -1,5 +1,7 @@
 """Small browser payload contract; no Agent execution or persistence."""
 
+import base64
+import binascii
 import hashlib
 import json
 from urllib.parse import urlsplit
@@ -9,6 +11,8 @@ from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 MAX_TEXT = 8000
 MAX_CONTEXT = 30000
+MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
+MAX_ATTACHMENTS = 4
 
 
 def js_length(value: str) -> int:
@@ -64,6 +68,52 @@ class PageContext(Payload):
         return self
 
 
+class AttachmentUpload(Payload):
+    name: str
+    mediaType: str
+    data: str
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value):
+        if not value.strip() or js_length(value) > 255:
+            raise ValueError("Attachment name is empty or too long")
+        return value
+
+    @field_validator("mediaType")
+    @classmethod
+    def validate_media_type(cls, value):
+        if len(value) > 100 or any(ord(c) < 0x20 for c in value):
+            raise ValueError("Attachment media type is invalid")
+        return value
+
+    @field_validator("data")
+    @classmethod
+    def validate_data(cls, value):
+        try:
+            raw = base64.b64decode(value, validate=True)
+        except (binascii.Error, ValueError):
+            raise ValueError("Attachment data is not base64") from None
+        if not raw:
+            raise ValueError("Attachment is empty")
+        if len(raw) > MAX_ATTACHMENT_BYTES:
+            raise ValueError("Attachment exceeds 5 MB")
+        return value
+
+    def raw(self) -> bytes:
+        return base64.b64decode(self.data, validate=True)
+
+
+class AttachmentRef(Payload):
+    attachmentId: str
+
+    @field_validator("attachmentId")
+    @classmethod
+    def validate_attachment_id(cls, value):
+        UUID(value)
+        return value
+
+
 class ApprovalDecisionPayload(Payload):
     decisionId: str
     approved: bool
@@ -87,6 +137,7 @@ class MessagePayload(Payload):
     requestId: str
     text: str
     pageContext: PageContext | None = None
+    attachments: list[AttachmentRef] | None = None
 
     @field_validator("requestId")
     @classmethod
@@ -99,6 +150,13 @@ class MessagePayload(Payload):
     def validate_text(cls, value):
         if not value.strip() or js_length(value) > MAX_TEXT:
             raise ValueError("Question is empty or exceeds 8000 characters")
+        return value
+
+    @field_validator("attachments")
+    @classmethod
+    def validate_attachments(cls, value):
+        if value is not None and len(value) > MAX_ATTACHMENTS:
+            raise ValueError("Too many attachments")
         return value
 
     def agent_text(self) -> str:
