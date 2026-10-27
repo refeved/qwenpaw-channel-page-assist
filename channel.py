@@ -446,7 +446,9 @@ class PageAssistChannel(BaseChannel):
         notes = "\n".join(
             f"[attachment {a.kind}: {a.name}]" for a in attachments
         )
-        return f"{payload.text}\n{notes}"
+        return (
+            f"{payload.text}\n{notes}" if payload.text.strip() else notes
+        )
 
     def _media_dir(self) -> Path:
         """Workspace media dir, mirroring the official channels."""
@@ -751,7 +753,10 @@ class PageAssistChannel(BaseChannel):
 
     def _content_parts(self, record):
         """Agent content list: text first, uploads as local file URIs."""
-        parts = [TextContent(text=record.payload.agent_text())]
+        base = record.payload.agent_text()
+        if not base.strip() and record.payload.attachments:
+            base = "The user sent files without a question."
+        parts = [TextContent(text=base)]
         for ref in record.payload.attachments or []:
             attachment = self._attachments.get(ref.attachmentId)
             if attachment is None:  # channel restarted; text still runs
@@ -786,7 +791,7 @@ class PageAssistChannel(BaseChannel):
                 request.session_id,
                 self._user,
                 self.channel,
-                name=record.payload.text,
+                name=record.payload.text.strip() or "Shared files",
             )
             record.chat_id = chat.id
             await self.consume_one(request)

@@ -761,6 +761,41 @@ async def test_attachment_upload_validation(service):
     }
 
 
+@pytest.mark.asyncio
+async def test_files_only_message_is_accepted(service):
+    image = await upload(service, "shot.png", PNG_BYTES, "image/png")
+    body = await image.json()
+    conversation = await create(service)
+    payload = {
+        "requestId": str(uuid4()),
+        "text": " ",
+        "attachments": [{"attachmentId": body["attachmentId"]}],
+    }
+    response = await service.client.post(
+        f"{service.prefix}/conversations/{conversation}/messages",
+        json=payload,
+    )
+    assert response.status == 202, await response.text()
+    assert await wait_done(service, payload["requestId"]) == "completed"
+    contents = service.calls[-1].input[0].content
+    assert contents[0].text == (
+        "The user sent files without a question."
+    )
+    response = await service.client.get(
+        f"{service.prefix}/conversations/{conversation}/messages",
+    )
+    history = await response.json()
+    assert history["messages"][0]["content"] == (
+        "[attachment image: shot.png]"
+    )
+    # A blank message without attachments is still rejected.
+    response = await service.client.post(
+        f"{service.prefix}/conversations/{conversation}/messages",
+        json={"requestId": str(uuid4()), "text": "  "},
+    )
+    assert response.status == 400
+
+
 def test_manifest_and_offline_install_validation():
     from qwenpaw.plugins.architecture import PluginManifest, PluginType
     from qwenpaw.plugins.validation import validate_plugin_module

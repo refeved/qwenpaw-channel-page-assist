@@ -148,9 +148,16 @@ class MessagePayload(Payload):
     @field_validator("text")
     @classmethod
     def validate_text(cls, value):
-        if not value.strip() or js_length(value) > MAX_TEXT:
-            raise ValueError("Question is empty or exceeds 8000 characters")
+        if js_length(value) > MAX_TEXT:
+            raise ValueError("Question exceeds 8000 characters")
         return value
+
+    @model_validator(mode="after")
+    def validate_question_or_attachment(self):
+        # A screenshot-only message is legitimate; nothing else may be blank.
+        if not self.text.strip() and not self.attachments:
+            raise ValueError("Provide a question or attach a file")
+        return self
 
     @field_validator("attachments")
     @classmethod
