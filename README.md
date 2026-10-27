@@ -26,9 +26,10 @@ Remote Agent；协议、存储键、路由和前端客户端仍沿用 `qwenpaw` 
   不降级权限、不绕过检查。归属无法确认或超出本版本的审批仍在 Console 处理。
   待审批不写入对话消息：输入框旁按钮在无待审批时置灰，有待审批时高亮并弹出
   气泡，任务进入 `waiting_approval` 只由状态与轮询体现。
-- Remote Agent 界面只保留文字聊天、显式网页／选区分享、当前实例内会话历史和
-  新建会话。本地 RAG、联网搜索、MCP、提示词、临时聊天、逐会话模型参数、
-  文件／图片上传、视觉／OCR、语音、Page Action 和 WebMCP 不提供或禁用；
+- Remote Agent 界面提供文字聊天、显式网页／选区分享、图片／文件附件（需新版
+  扩展配合）、当前实例内会话历史和新建会话；语音输入、TTS 朗读与提示词插入
+  由浏览器本地完成。本地 RAG、联网搜索、MCP、临时聊天、逐会话模型参数、
+  视觉／OCR、Page Action 和 WebMCP 不提供或禁用；
   未接通入口会说明原因。
 - Firefox 版本不显示 Remote Agent 入口（MV2 缺少
   `chrome.storage.local.setAccessLevel`）；请使用 Chrome／Chromium。
@@ -112,7 +113,11 @@ WSL Chrome 与 QwenPaw 在同一 WSL 环境中时可直接使用上述 loopback 
 
 浏览器路径保持 `/api/page-assist`。提供 capabilities、唯一 Agent、新建聊天、
 提交消息、会话内历史、请求状态及请求事件接口。接口载荷沿用前端 v1，声明
-`recovery=false`、`approvals=true`、`approvalEvents=false`；待审批列表与决定走
+`recovery=false`、`approvals=true`、`approvalEvents=false`、
+`attachments=true`（单附件上限 5 MB、每条消息最多 4 个）；附件经
+`POST /attachments` 以 base64 上传，落盘到绑定 Agent 工作区的
+`media/page_assist` 目录，消息按 attachmentId 一次性引用，Agent 侧收到
+`file://` 形式的图片／文件内容。待审批列表与决定走
 `GET /approvals` 与 `POST /approvals/{id}/decision`，前端每 5 秒轮询对账，
 不依赖推送。
 
