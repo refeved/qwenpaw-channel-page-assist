@@ -1,4 +1,4 @@
-# Page Assist channel (0.1.1)
+# Page Assist channel (0.1.2)
 
 仓库：[refeved/qwenpaw-channel-page-assist](https://github.com/refeved/qwenpaw-channel-page-assist)。
 插件清单及入口直接位于仓库根目录，
@@ -7,8 +7,8 @@
 独立安装的单 Agent 频道插件。运行在 QwenPaw 进程内，自带一个 HTTP 监听端口；
 不修改核心、不单独部署中继服务，也不调用 OpenAI-compatible 聊天接口绕过原生 Agent。
 它是 Page Assist **Remote Agent** Provider 的首个后端实现。当前发布组合为
-v0.1.1：QwenPaw `2.2.2.post1`、Page Assist `agent-usage-v0.1.1`、本插件
-`qwenpaw-channel-page-assist-v0.1.1`（插件版本 `0.1.1`）。界面 Provider 名为
+v0.1.2：QwenPaw `2.2.2.post1`、Page Assist `agent-usage-v0.1.2`、本插件
+`qwenpaw-channel-page-assist-v0.1.2`（插件版本 `0.1.2`）。界面 Provider 名为
 Remote Agent；协议、存储键、路由和前端客户端仍沿用 `qwenpaw` 命名空间。
 
 ## 第一版范围
@@ -80,7 +80,7 @@ qwenpaw plugin install /path/to/qwenpaw-channel-page-assist
 本版本不依赖“先启动新监听、再关闭旧监听”的热替换流程；端口冲突会明确报错。
 
 以下步骤要求使用包含 Remote Agent Provider 的 Page Assist 构建
-（发布 tag `agent-usage-v0.1.1` 或 `feat/qwenpaw-remote-channel` 分支）。
+（发布 tag `agent-usage-v0.1.2` 或 `feat/qwenpaw-remote-channel` 分支）。
 重新构建并重新加载扩展后：
 
 1. 在 Chrome 侧边栏 header 左侧、Page Assist 字样之后，把 **Local models** 切换为
