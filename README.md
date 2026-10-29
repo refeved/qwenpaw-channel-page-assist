@@ -1,154 +1,193 @@
 # Page Assist channel (0.1.2)
 
-仓库：[refeved/qwenpaw-channel-page-assist](https://github.com/refeved/qwenpaw-channel-page-assist)。
-插件清单及入口直接位于仓库根目录，
-无需克隆或修改 QwenPaw 源码。宿主使用 pip 发布版；插件仍运行在宿主进程内。
+[简体中文](README.zh-CN.md) | English
 
-独立安装的单 Agent 频道插件。运行在 QwenPaw 进程内，自带一个 HTTP 监听端口；
-不修改核心、不单独部署中继服务，也不调用 OpenAI-compatible 聊天接口绕过原生 Agent。
-它是 Page Assist **Remote Agent** Provider 的首个后端实现。当前发布组合为
-v0.1.2：QwenPaw `2.2.2.post1`、Page Assist `agent-usage-v0.1.2`、本插件
-`qwenpaw-channel-page-assist-v0.1.2`（插件版本 `0.1.2`）。界面 Provider 名为
-Remote Agent；协议、存储键、路由和前端客户端仍沿用 `qwenpaw` 命名空间。
+Repository: [refeved/qwenpaw-channel-page-assist](https://github.com/refeved/qwenpaw-channel-page-assist).
+The plugin manifest and entry point sit directly at the repository root;
+no QwenPaw source clone or modification is needed. The host comes from the pip release;
+the plugin still runs inside the host process.
 
-## 第一版范围
+A standalone, single-Agent channel plugin. It runs in the QwenPaw process with its own
+HTTP listen port; it does not modify the core, does not deploy a separate relay service,
+and does not call an OpenAI-compatible chat API to bypass the native Agent. It is the
+first backend implementation of the Page Assist **Remote Agent** provider. The current
+release set is v0.1.2: QwenPaw `2.2.2.post1`, Page Assist `agent-usage-v0.1.2`, this
+plugin `qwenpaw-channel-page-assist-v0.1.2` (plugin version `0.1.2`). The UI provider
+name is Remote Agent; protocol, storage keys, routes and the frontend client keep the
+`qwenpaw` namespace.
 
-- 一个频道地址绑定当前工作区的一个 Agent；不是全局 Agent 网关。侧栏回复显示该
-  Agent 配置的名称（0.1.1 起），不再使用固定标签。
-- 文字提问、同聊天追问、新建独立聊天。
-- 显式分享网页正文或选区，复用 Page Assist 的快照预览与确认。
-- 通过 `BaseChannel.consume_one`、原生 TaskTracker 和工作区执行函数运行 Agent。
-  原生工具、记忆与权限策略不被替换。
-- 显示已完成的文本消息，不显示隐藏思考或工具参数。SSE 仅运输完整消息和状态，
-  不实现逐 token 输出。
-- 原生审批在侧栏内联处理：直接复用 ApprovalService 的待审批记录与原生决定入口
-  （`exact` 始终可选，`similar` 仅在原生给出泛化目标时提供），不自动批准、
-  不降级权限、不绕过检查。归属无法确认或超出本版本的审批仍在 Console 处理。
-  待审批不写入对话消息：输入框旁按钮在无待审批时置灰，有待审批时高亮并弹出
-  气泡，任务进入 `waiting_approval` 只由状态与轮询体现。
-- Remote Agent 界面提供文字聊天、显式网页／选区分享、图片／文件／网页截图附件
-  （需新版扩展配合；截图由扩展在本地捕获可见标签页后走同一上传通道）、当前实例内
-  会话历史和新建会话；语音输入、TTS 朗读与提示词插入
-  由浏览器本地完成。本地 RAG、联网搜索、MCP、临时聊天、逐会话模型参数、
-  OCR、Page Action 和 WebMCP 不提供或禁用；
-  未接通入口会说明原因。
-- Firefox 版本不显示 Remote Agent 入口（MV2 缺少
-  `chrome.storage.local.setAccessLevel`）；请使用 Chrome／Chromium。
+## First-version scope
 
-延期：全局多 Agent 发现、跨重启历史恢复、断线自动恢复、持久请求账本、
-取消按钮、富媒体、主动推送、审批事件推送。不要依赖本版本作为生产远程网关。
+- One channel endpoint binds one Agent in the current workspace; this is not a global
+  Agent gateway. Side-panel replies show the bound Agent's configured name (since 0.1.1)
+  instead of a fixed label.
+- Text questions, follow-ups in the same chat, and new independent chats.
+- Explicit sharing of page text or the selection, reusing Page Assist's snapshot preview
+  and confirmation.
+- The Agent runs through `BaseChannel.consume_one`, the native TaskTracker and the
+  workspace execution functions. Native tools, memory and permission policies are not
+  replaced.
+- Completed text messages are displayed; hidden thinking and tool arguments are not.
+  SSE carries whole messages and status only; there is no token-by-token output.
+- Native approvals are handled inline in the side panel: the plugin reuses
+  ApprovalService's pending records and the native decision entry points (`exact` is
+  always available, `similar` only when the native side produced a generalized target).
+  Nothing is auto-approved, downgraded or bypassed. Approvals whose ownership cannot be
+  established, or that are out of this version's scope, stay in the Console. Pending
+  approvals are not written into conversation messages: the button beside the composer
+  is grey when nothing is pending, highlights and opens a popover otherwise, and the
+  `waiting_approval` state is carried by status and polling only.
+- The Remote Agent UI offers text chat, explicit page/selection sharing, image/file/
+  page-screenshot attachments (a matching extension build is required; the screenshot is
+  captured locally from the visible tab and staged through the same upload path),
+  conversation history within the current instance, and new chats; speech dictation, TTS
+  playback and prompt insertion run in the browser. Local RAG, web search, MCP, temporary
+  chat, per-chat model settings, OCR, Page Action and WebMCP are unavailable or disabled;
+  unconnected entries state their reason.
+- Firefox does not show the Remote Agent entry (MV2 lacks
+  `chrome.storage.local.setAccessLevel`); use Chrome/Chromium or Edge.
 
-## 安装与连接
+Deferred: global multi-Agent discovery, history recovery across restarts, automatic
+reconnect after drops, a persistent request ledger, a cancel button, rich media,
+proactive push, and approval event push. Do not treat this version as a production
+remote gateway.
 
-在**已有完整 QwenPaw 运行环境**的终端安装本仓库根目录：
+## Installation and connection
+
+Install this repository root in a terminal that already has a complete QwenPaw runtime:
 
 ```bash
 qwenpaw plugin install /path/to/qwenpaw-channel-page-assist
 ```
 
-宿主尚未安装时先执行 `pip install qwenpaw==2.2.2.post1`。
-更新插件代码后执行 `qwenpaw plugin install /path/to/qwenpaw-channel-page-assist --force`，
-再重启宿主；安装目录是宿主管理的副本，不会随仓库编辑自动更新。
-不需要构建 QwenPaw Console，也不需要设置 `PYTHONPATH`。
+If the host is not installed yet, run `pip install qwenpaw==2.2.2.post1` first.
+After changing plugin code, run
+`qwenpaw plugin install /path/to/qwenpaw-channel-page-assist --force` and restart the
+host; the install directory is a host-managed copy and does not track repository edits.
+Building the QwenPaw Console is not required, and no `PYTHONPATH` setup is needed.
 
-两条安装前提（实测于 QwenPaw 2.2.2.post1）：
+Two installation prerequisites (verified on QwenPaw 2.2.2.post1):
 
-- 宿主用自身 Python 环境的 pip 安装 `requirements.txt`，该 pip 不得低于 `26.2.2`，
-  否则安装会在依赖步骤被判为不安全并整体回滚。
-- 安装源目录不要携带 `.git`：宿主整目录复制，Windows 下只读的 git object 会导致
-  复制阶段失败。可先把 `plugin.json`、`plugin.py`、`channel.py`、`protocol.py`、
-  `requirements.txt` 复制到空目录再安装。
+- The host installs `requirements.txt` with pip from its own Python environment; that
+  pip must be at least `26.2.2`, or the install is judged unsafe at the dependency step
+  and rolls back entirely.
+- The source directory must not contain `.git`: the host copies whole directories, and
+  read-only git objects on Windows fail the copy. Copy `plugin.json`, `plugin.py`,
+  `channel.py`, `protocol.py` and `requirements.txt` into an empty directory first.
 
-在 Console 中确认插件启用，选中目标 Agent，在频道管理中配置 **Page Assist**：
+In the Console, confirm the plugin is enabled, select the target Agent, and configure
+**Page Assist** in channel management:
 
-| 配置 | 值 |
+| Setting | Value |
 | --- | --- |
-| Enabled | 开启 |
-| Browser token | 自行生成的随机专用密钥，至少 32 个 ASCII 字符，无空白 |
-| HTTP bind address | 本地验证使用 `127.0.0.1` |
-| HTTP port | `8766`，不同 Agent 必须使用不同端口 |
+| Enabled | on |
+| Browser token | a freshly generated random dedicated secret, at least 32 ASCII characters, no whitespace |
+| HTTP bind address | `127.0.0.1` for local verification |
+| HTTP port | `8766`; different Agents must use different ports |
 
-可在 QwenPaw 的 Python 环境中用 `python -c "import secrets; print(secrets.token_urlsafe(32))"`
-生成随机密钥。不要将密钥写入仓库、日志或聊天。
+Generate a random key in QwenPaw's Python environment with
+`python -c "import secrets; print(secrets.token_urlsafe(32))"`.
+Never write the key into repositories, logs or chats.
 
-频道配置只从 **Agent 级** 配置读取，即 `workspaces/<agent>/agent.json` 中的
-`channels.page_assist`；写在宿主全局 `config.json` 的同名键不会启动监听。用 Console
-或频道管理界面保存即可，不需要手工改全局 Agent 路由。
+Channel configuration is read only from the **Agent-level** config, i.e.
+`channels.page_assist` inside `workspaces/<agent>/agent.json`; the same key in the host
+global `config.json` starts no listener. Save it via the Console or the channel
+management UI; no manual global Agent routing edits are needed.
 
-首次安装或修改频道配置后重启 QwenPaw，检查日志出现
-`Page Assist channel listening on 127.0.0.1:8766`。
-本版本不依赖“先启动新监听、再关闭旧监听”的热替换流程；端口冲突会明确报错。
+After a fresh install or a channel config change, restart QwenPaw and check the log for
+`Page Assist channel listening on 127.0.0.1:8766`.
+This version does not rely on a "start the new listener, then close the old one" hot
+replacement; port conflicts fail loudly.
 
-以下步骤要求使用包含 Remote Agent Provider 的 Page Assist 构建
-（发布 tag `agent-usage-v0.1.2` 或 `feat/qwenpaw-remote-channel` 分支）。
-重新构建并重新加载扩展后：
+The steps below require a Page Assist build containing the Remote Agent provider
+(release tag `agent-usage-v0.1.2` or the `feat/qwenpaw-remote-channel` branch).
+After rebuilding and reloading the extension:
 
-1. 在 Chrome 侧边栏 header 左侧、Page Assist 字样之后，把 **Local models** 切换为
-   **Remote Agent**。首次使用且没有 provider 记录／Ollama URL 时，空态显示
-   “Choose how you want to chat”；选择 Remote Agent 且尚未配置时，连接表单内联展开。
-2. 已有配置可通过 header 切换器，或 options／侧栏设置中的独立 **Remote Agent** Tab
-   （`/settings/qwenpaw`）打开同一连接表单。该 Tab 与 General Settings、
-   OpenAI Compatible API、Manage Models 并列，不在 General Settings 中。
-3. 服务地址填写 `http://127.0.0.1:8766`，不是 Console 的端口。
-4. 浏览器凭据填写同一个 Browser token，不使用 Console 管理员令牌。
-5. Console 地址暂留空。第一版仍保留前端同源链接限制，而 Console 通常在不同端口，
-   因此需要手工打开原 Console，不通过聊天内容中的链接授权。
-6. 测试连接、保存、返回；首条问题自动创建聊天，顶部新建按钮可开始另一段聊天。
+1. In the Chrome side panel header, left of the Page Assist wordmark, switch
+   **Local models** to **Remote Agent**. On first use with no provider record / Ollama
+   URL, the empty state asks "Choose how you want to chat"; picking Remote Agent without
+   a configuration expands the connection form inline.
+2. With an existing config, the same form opens from the header switcher or the
+   dedicated **Remote Agent** tab (`/settings/qwenpaw`) in the options page / side-panel
+   settings. That tab sits beside General Settings, OpenAI Compatible API and Manage
+   Models, not inside General Settings.
+3. Service URL: `http://127.0.0.1:8766` — not the Console's port.
+4. Browser credential: the same Browser token; do not use the Console admin token.
+5. Leave the Console address empty for now. The first version keeps the frontend
+   same-origin link restriction, and the Console usually runs on a different port, so
+   open the original Console manually rather than authorizing through links in chat.
+6. Test the connection, save, return. The first question creates a chat automatically;
+   the top New button starts another one.
 
-![侧栏设置中的 Remote Agent Tab](docs/assets/page-assist-remote-agent-settings-tab.png)
+![The Remote Agent tab in the side-panel settings](docs/assets/page-assist-remote-agent-settings-tab.png)
 
-上图是侧栏设置的 Tab 栏；options 页的导航还额外提供 RAG、Ollama、MCP 等条目。
+The image shows the side-panel settings tab bar; the options page navigation lists
+extra entries such as RAG, Ollama and MCP.
 
-远程路径不需要 Ollama 配置。Firefox 不提供 Remote Agent 入口；界面细节与最新行为
-见 Page Assist Fork 的 [Remote Agent 指南](https://github.com/refeved/page-assist-agent-usage/blob/feat/qwenpaw-remote-channel/docs/qwenpaw-remote.md)。
+The remote path needs no Ollama configuration. Firefox does not expose the Remote Agent
+entry; for UI details and the latest behaviour see the Remote Agent guide in the
+Page Assist fork:
+[docs/qwenpaw-remote.md](https://github.com/refeved/page-assist-agent-usage/blob/feat/qwenpaw-remote-channel/docs/qwenpaw-remote.md).
 
-WSL Chrome 与 QwenPaw 在同一 WSL 环境中时可直接使用上述 loopback 地址。
-不要直接将明文监听暴露到公网。远程使用必须自行部署 HTTPS 反向代理，
-仅代理此专用端口，并继续保留插件 Bearer 认证；扩展拒绝非 loopback HTTP。
+When WSL Chrome and QwenPaw share one WSL environment, the loopback addresses above work
+directly. Never expose the plaintext listener to the public internet. Remote use
+requires your own HTTPS reverse proxy in front of this dedicated port only, keeping the
+plugin's Bearer auth; the extension rejects non-loopback HTTP.
 
-**凭据权限**：本版本是一个共享凭据代表一个浏览器用户，可调用绑定 Agent 的
-原生能力；不是多用户身份系统，也没有额外的逐工具 token scope。
-只给可信浏览器使用；原生工具审批仍按 Agent 自身策略执行。
+**Credential authority**: this version has one shared credential acting for one browser
+user, able to invoke the bound Agent's native capabilities. It is not a multi-user
+identity system and adds no per-tool token scopes. Restrict it to trusted browsers;
+native tool approvals still follow the Agent's own policy.
 
-## 状态与数据边界
+## State and data boundaries
 
-浏览器路径保持 `/api/page-assist`。提供 capabilities、唯一 Agent、新建聊天、
-提交消息、会话内历史、请求状态及请求事件接口。接口载荷沿用前端 v1，声明
-`recovery=false`、`approvals=true`、`approvalEvents=false`、
-`attachments=true`（单附件上限 5 MB、每条消息最多 4 个）；附件经
-`POST /attachments` 以 base64 上传，落盘到绑定 Agent 工作区的
-`media/page_assist` 目录，消息按 attachmentId 一次性引用，Agent 侧收到
-`file://` 形式的图片／文件内容。待审批列表与决定走
-`GET /approvals` 与 `POST /approvals/{id}/decision`，前端每 5 秒轮询对账，
-不依赖推送。
+The browser path stays on `/api/page-assist`. It serves capabilities, the single Agent,
+new chats, message submission, in-chat history, request status and request events.
+Payloads follow frontend v1 and declare `recovery=false`, `approvals=true`,
+`approvalEvents=false`, `attachments=true` (5 MB per attachment, at most 4 per message);
+attachments upload as base64 via `POST /attachments` and land in the bound Agent
+workspace's `media/page_assist` directory, referenced once per message by attachmentId,
+with the Agent receiving `file://` image/file content. The pending list and decisions go
+through `GET /approvals` and `POST /approvals/{id}/decision`; the frontend reconciles by
+polling every 5 seconds and does not rely on push.
 
-- 请求体闸门：频道对整个 HTTP body 设 8 MiB 上限（单附件 5 MiB，base64 膨胀约
-  4/3）。若经 HTTPS 反向代理或中继转发，前置层放行的 body 必须不小于 ~7 MiB
-  （如 nginx `client_max_body_size 10m;`）；否则中继会先于频道返回自己的 413，
-  频道无从感知。扩展会对被 413 拒绝的图片压缩后重试一次，但部署仍应配足额度。
-- 同一聊天一次一个请求，占用时返回 409，不进入消息合并队列。
-- 同实例内相同 requestId 与相同负载不会重跑；负载或聊天不同时返回 409。
-- 同时最多保留 100 个聊天、500 个请求；达到容量返回 429，不静默驱逐。
-- 待审批只暴露本频道实例、本浏览器凭据所拥有会话的记录；其他频道或其他实例的
-  审批不可见也不可决定。同一 `decisionId` 重复提交返回已确认结果，与已确认结果
-  冲突的决定返回 409，不覆盖原生结论。
-- 请求、网页负载和浏览器展示历史仅保存在内存。频道重新实例化后 instanceId
-  改变，前端缓存自动分区；需要新建聊天，不能恢复旧的浏览器聊天。
-- 原生历史、记忆或工具副作用可能已持久保存，**不随频道内存清空而删除**。
-- 关闭浏览器或停止显示不取消 Agent。提交结果丢失或运行时断线后，前端不自动
-  重发，不承诺恢复；请到 Console 核实，避免重复执行有副作用的请求。
-- 关闭频道会停止其原生运行任务。服务停止不保证已经执行的工具副作用可撤销。
+- Request-body gate: the channel caps the whole HTTP body at 8 MiB (a 5 MiB attachment
+  inflates to roughly 4/3 in base64). Behind an HTTPS reverse proxy or relay, the front
+  layer must allow bodies of at least ~7 MiB (e.g. nginx `client_max_body_size 10m;`),
+  or the relay returns its own 413 before the channel ever sees the request. The
+  extension compresses and retries an image rejected with 413 once, but deployments
+  should still provision enough headroom.
+- One request at a time per chat; a busy chat returns 409 instead of joining a message
+  merge queue.
+- The same requestId with the same payload never re-runs within one instance; differing
+  payload or chat returns 409.
+- At most 100 chats and 500 requests live at once; capacity limits return 429, nothing is
+  evicted silently.
+- The pending list exposes only records owned by this channel instance and this browser
+  credential's sessions; approvals from other channels or instances are neither visible
+  nor decidable. Re-submitting the same `decisionId` returns the confirmed result; a
+  decision conflicting with it returns 409 and never overwrites the native conclusion.
+- Requests, page payloads and the browser display history live in memory only. After the
+  channel is re-instantiated the instanceId changes, frontend caches re-partition
+  automatically; you must start a new chat — old browser chats cannot be restored.
+- Native history, memory or tool side effects may already be persisted and are **not
+  deleted when the channel's memory clears**.
+- Closing the browser or hiding the view does not cancel the Agent. After a lost
+  submission result or a runtime drop, the frontend never auto-resends and promises no
+  recovery; verify in the Console and avoid re-executing requests with side effects.
+- Closing the channel stops its native running tasks. Stopping the service makes no
+  guarantee that already-executed tool side effects are reversible.
 
-## 开发验证
+## Development verification
 
-单独克隆本仓库后，在开发虚拟环境中执行：
+After cloning this repository alone, in a development virtual environment:
 
 ```bash
 python -m pip install -r requirements-dev.txt
 python -m pytest -q tests/test_channel.py
 ```
 
-在集成工作区根目录中，复用现有发布版环境验证：
+To verify inside the integration workspace root, reusing the released environment:
 
 ```bash
 env -u PYTHONPATH .venv/bin/python -m pytest -q \
@@ -159,21 +198,25 @@ bun run build:chrome
 node tests/qwenpaw-channel-browser.mjs
 ```
 
-测试还需要 `pytest`、`pytest-asyncio` 以及宿主的 AgentScope 等原生依赖。
-浏览器测试默认使用工作区 `.venv/bin/python`，可通过 `QWENPAW_TEST_PYTHON`
-指定解释器；插件位于其他目录时通过 `QWENPAW_CHANNEL_DIR` 指定仓库根目录。
-测试不注入 QwenPaw 源码路径，使用该解释器实际安装的宿主。
-使用系统 Chrome / WSLg，并自动清理测试进程和临时浏览器目录。
+Tests also need `pytest`, `pytest-asyncio` and the host's native dependencies such as
+AgentScope. The browser test uses the workspace `.venv/bin/python` by default; point
+`QWENPAW_TEST_PYTHON` at another interpreter, and `QWENPAW_CHANNEL_DIR` at the repository
+root when the plugin lives elsewhere. Tests inject no QwenPaw source paths and use the
+host actually installed in that interpreter. System Chrome / WSLg is used, and test
+processes and temporary browser directories are cleaned up automatically.
 
-这组测试使用真实插件 HTTP、BaseChannel 和 TaskTracker，但 Agent 执行函数、
-ChatManager 与工具发现配置是隔离的确定性测试替身，**不是模型、记忆和真实
-审批服务的端到端验收**。最终仍需在已有 Agent 上手工验证实际模型和工具。
+This test set exercises real plugin HTTP, BaseChannel and TaskTracker, while the Agent
+execution function, ChatManager and tool discovery are isolated deterministic test
+doubles — **not an end-to-end acceptance of model, memory and real approvals**. Final
+verification still means manual runs against an existing Agent with the real model and
+tools.
 
-## 许可与免责声明
+## License and disclaimer
 
-本仓库采用 [Apache License 2.0](LICENSE)。
+This repository is under the [Apache License 2.0](LICENSE).
 
-本项目是独立的社区插件，与 QwenPaw、Page Assist 项目无隶属关系，也未获其背书。
-插件通过 QwenPaw 的公开插件 API 运行，不包含上游源代码。Page Assist 为
-Muhammed Nazeem 的 MIT 许可项目，QwenPaw 为 Apache-2.0 项目；
-相关名称与图标归各自权利人所有。
+This project is an independent community plugin, unaffiliated with and unendorsed by the
+QwenPaw or Page Assist projects. The plugin runs through QwenPaw's public plugin API and
+contains no upstream source code. Page Assist is Muhammed Nazeem's MIT-licensed project
+and QwenPaw is an Apache-2.0 project; related names and icons belong to their respective
+owners.
