@@ -122,6 +122,10 @@ WSL Chrome 与 QwenPaw 在同一 WSL 环境中时可直接使用上述 loopback 
 `GET /approvals` 与 `POST /approvals/{id}/decision`，前端每 5 秒轮询对账，
 不依赖推送。
 
+- 请求体闸门：频道对整个 HTTP body 设 8 MiB 上限（单附件 5 MiB，base64 膨胀约
+  4/3）。若经 HTTPS 反向代理或中继转发，前置层放行的 body 必须不小于 ~7 MiB
+  （如 nginx `client_max_body_size 10m;`）；否则中继会先于频道返回自己的 413，
+  频道无从感知。扩展会对被 413 拒绝的图片压缩后重试一次，但部署仍应配足额度。
 - 同一聊天一次一个请求，占用时返回 409，不进入消息合并队列。
 - 同实例内相同 requestId 与相同负载不会重跑；负载或聊天不同时返回 409。
 - 同时最多保留 100 个聊天、500 个请求；达到容量返回 429，不静默驱逐。
