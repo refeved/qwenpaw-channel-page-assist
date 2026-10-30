@@ -73,6 +73,18 @@ IMAGE_MAGIC = (
     (b"BM", ".bmp", "image/bmp"),
 )
 
+# A file the Agent hands over rarely rides on the final answer: `send_file`
+# returns it as a tool *output*, and the renderer keeps those media parts even
+# with `show_tool_results=False` (only the text label is hidden). Forwarding
+# `MESSAGE` alone therefore threw away every reply attachment, while tool
+# *calls*, reasoning and approval events still carry nothing to display.
+FORWARDED_MESSAGE_TYPES = (
+    MessageType.MESSAGE,
+    MessageType.FUNCTION_CALL_OUTPUT,
+    MessageType.PLUGIN_CALL_OUTPUT,
+    MessageType.MCP_TOOL_CALL_OUTPUT,
+)
+
 
 def classify_image(raw: bytes) -> tuple[str | None, str | None]:
     """Return (extension, media type) when magic bytes prove a real image."""
@@ -1176,7 +1188,14 @@ class PageAssistChannel(BaseChannel):
     async def on_event_message_completed(
         self, request, to_handle, event, send_meta
     ):
-        if getattr(event, "type", None) == MessageType.MESSAGE:
+        """Forward the answer plus any media a tool produced.
+
+        Tool outputs are included because that is where `send_file` puts real
+        media; their text label stays hidden by `show_tool_results=False`, so
+        only the attachment reaches the panel. Everything else (reasoning, tool
+        calls, approval events with no `type`) keeps being dropped.
+        """
+        if getattr(event, "type", None) in FORWARDED_MESSAGE_TYPES:
             await super().on_event_message_completed(
                 request, to_handle, event, send_meta
             )
