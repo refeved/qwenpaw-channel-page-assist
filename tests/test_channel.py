@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import aiohttp
 import pytest
@@ -21,6 +21,7 @@ import pytest_asyncio
 
 PLUGIN = Path(__file__).resolve().parents[1]
 TOKEN = "page-assist-test-token-not-for-production"
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"pixel" * 8
 
 
 def load_plugin():
@@ -65,6 +66,8 @@ def make_channel(port, workspace_dir=None):
     gates = {}
     remembered = {}
 
+    from qwenpaw.schemas import FileContent, ImageContent
+
     async def process(request):
         text = request.input[0].content[0].text
         calls.append(request)
@@ -72,6 +75,59 @@ def make_channel(port, workspace_dir=None):
             await gates.setdefault(request.session_id, asyncio.Event()).wait()
         if text == "error":
             raise RuntimeError("deterministic provider failure")
+        count = remembered.get(request.session_id, 0) + 1
+        remembered[request.session_id] = count
+        if text == "local media":
+            # A chart the Agent wrote inside its own workspace.
+            media_file = Path(workspace_dir) / "media" / "chart.png"
+            media_file.parent.mkdir(parents=True, exist_ok=True)
+            media_file.write_bytes(PNG_BYTES)
+            content = [
+                ImageContent(
+                    type="image",
+                    image_url=media_file.resolve().as_uri(),
+                )
+            ]
+        elif text == "remote media":
+            content = [
+                TextContent(text="Hosted elsewhere"),
+                ImageContent(
+                    type="image",
+                    image_url="https://cdn.example/chart.png",
+                ),
+            ]
+        elif text == "odd media":
+            content = [
+                ImageContent(type="image", image_url="file:///no/such/file"),
+                FileContent(
+                    type="file",
+                    file_url="data:image/png;base64,not!!base64",
+                    filename="broken.png",
+                ),
+                FileContent(type="file", file_url="", filename="empty.pdf"),
+            ]
+        elif text == "many media":
+            content = [
+                ImageContent(
+                    type="image",
+                    image_url="data:image/png;base64,"
+                    + base64.b64encode(PNG_BYTES).decode(),
+                )
+                for _ in range(6)
+            ]
+        elif text == "big media":
+            content = [
+                FileContent(
+                    type="file",
+                    file_url="data:application/pdf;base64,"
+                    + base64.b64encode(b"a" * (6 * 1024 * 1024)).decode(),
+                    filename="huge.pdf",
+                )
+            ]
+        else:
+            content = [
+                TextContent(text=f"Native reply {count}: {text}")
+            ]
         if text == "approval":
             from qwenpaw.app.approvals import (
                 ApprovalRequestSummary,
@@ -117,8 +173,6 @@ def make_channel(port, workspace_dir=None):
             )
             yield Event(object="response", status=RunStatus.Completed)
             return
-        count = remembered.get(request.session_id, 0) + 1
-        remembered[request.session_id] = count
         yield Event(
             object="message",
             type=MessageType.REASONING,
@@ -129,7 +183,7 @@ def make_channel(port, workspace_dir=None):
             object="message",
             type=MessageType.MESSAGE,
             status=RunStatus.Completed,
-            content=[TextContent(text=f"Native reply {count}: {text}")],
+            content=content,
         )
         yield Event(object="response", status=RunStatus.Completed)
 
@@ -632,7 +686,6 @@ async def test_exact_limits_and_capacity(service):
     assert len(service.calls) == 1
 
 
-PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"pixel" * 8
 PDF_BYTES = b"%PDF-1.4 deterministic fake body"
 
 
@@ -646,6 +699,141 @@ async def upload(service, name, data, media_type=""):
         },
     )
     return response
+
+
+async def collect_events(service, request_id):
+    response = await service.client.get(
+        f"{service.prefix}/requests/{request_id}/events"
+    )
+    return [
+        json.loads(line[6:])
+        for line in (await response.text()).splitlines()
+        if line.startswith("data: ")
+    ]
+
+
+async def last_reply(service, conversation, text, **extra):
+    """Send one turn and return its authoritative assistant message."""
+    payload = await submit(service, conversation, text, **extra)
+    assert await wait_done(service, payload["requestId"]) == "completed"
+    response = await service.client.get(
+        f"{service.prefix}/conversations/{conversation}/messages",
+    )
+    history = await response.json()
+    return payload, [
+        message
+        for message in history["messages"]
+        if message["role"] == "assistant"
+    ][-1]
+
+
+@pytest.mark.asyncio
+async def test_reply_media_returns_as_files_not_server_paths(service):
+    conversation = await create(service)
+    payload, message = await last_reply(service, conversation, "local media")
+    assert message["content"] == ""
+    assert len(message["attachments"]) == 1
+    image = message["attachments"][0]
+    assert image["kind"] == "image"
+    assert image["mediaType"] == "image/png"
+    assert image["bytes"] == len(PNG_BYTES)
+    assert UUID(image["mediaId"])
+    # Nothing but the opaque id travels; no file:// and no absolute path.
+    assert "file:" not in json.dumps(message)
+    assert "path" not in image
+
+    response = await service.client.get(
+        f"{service.prefix}/media/{image['mediaId']}"
+    )
+    assert response.status == 200
+    assert response.headers["Content-Type"] == "image/png"
+    assert response.headers["Content-Disposition"].startswith("inline;")
+    assert (await response.read()) == PNG_BYTES
+    # The bytes also live in the workspace media directory, not only in memory.
+    assert (
+        Path(service.channel._media_dir()) / f"{image['mediaId']}.png"
+    ).is_file()
+
+    snapshots = [
+        event
+        for event in await collect_events(service, payload["requestId"])
+        if event["type"] == "message.snapshot"
+    ]
+    assert snapshots[0]["messageId"] == message["id"]
+    assert snapshots[0]["attachments"] == message["attachments"]
+
+    wrong = await service.client.get(
+        f"{service.prefix}/media/{image['mediaId']}",
+        headers={"Authorization": "Bearer wrong"},
+    )
+    assert wrong.status == 401
+    missing = await service.client.get(
+        f"{service.prefix}/media/{str(uuid4())}"
+    )
+    assert missing.status == 404
+    bogus = await service.client.get(f"{service.prefix}/media/not-a-uuid")
+    assert bogus.status == 404
+
+
+@pytest.mark.asyncio
+async def test_remote_reply_media_keeps_its_public_url(service):
+    conversation = await create(service)
+    _, message = await last_reply(service, conversation, "remote media")
+    assert message["content"] == "Hosted elsewhere"
+    assert message["attachments"] == [
+        {
+            "url": "https://cdn.example/chart.png",
+            "kind": "image",
+            "name": "chart.png",
+            "mediaType": "image/png",
+            "bytes": 0,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_uploaded_images_come_back_as_reusable_media(service):
+    conversation = await create(service)
+    image = await upload(service, "shot.png", PNG_BYTES, "image/png")
+    attachment_id = (await image.json())["attachmentId"]
+    payload = await submit(
+        service,
+        conversation,
+        "look",
+        attachments=[{"attachmentId": attachment_id}],
+    )
+    assert await wait_done(service, payload["requestId"]) == "completed"
+    response = await service.client.get(
+        f"{service.prefix}/conversations/{conversation}/messages",
+    )
+    mine = (await response.json())["messages"][0]
+    assert mine["content"] == "look\n[attachment image: shot.png]"
+    assert mine["attachments"][0]["mediaId"] == attachment_id
+    assert mine["attachments"][0]["kind"] == "image"
+    served = await service.client.get(
+        f"{service.prefix}/media/{attachment_id}"
+    )
+    assert served.status == 200
+    assert (await served.read()) == PNG_BYTES
+
+
+@pytest.mark.asyncio
+async def test_unsupported_or_oversized_reply_media_is_explained(service):
+    conversation = await create(service)
+
+    _, message = await last_reply(service, conversation, "odd media")
+    assert message["attachments"] == []
+    assert "no longer available" in message["content"]
+    assert "could not be decoded" in message["content"]
+    assert "file:///" not in message["content"]
+
+    _, message = await last_reply(service, conversation, "many media")
+    assert len(message["attachments"]) == 4
+    assert "more than 4 attachments" in message["content"]
+
+    _, message = await last_reply(service, conversation, "big media")
+    assert message["attachments"] == []
+    assert "larger than 5 MB" in message["content"]
 
 
 @pytest.mark.asyncio
