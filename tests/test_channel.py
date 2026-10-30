@@ -66,7 +66,27 @@ def make_channel(port, workspace_dir=None):
     gates = {}
     remembered = {}
 
-    from qwenpaw.schemas import FileContent, ImageContent
+    from qwenpaw.schemas import DataContent, FileContent, ImageContent
+
+    def tool_output_event(blocks):
+        """A tool result shaped exactly like the runtime emits one."""
+        return Event(
+            object="message",
+            type=MessageType.PLUGIN_CALL_OUTPUT,
+            status=RunStatus.Completed,
+            content=[
+                DataContent(
+                    type="data",
+                    data={
+                        "call_id": "call-1",
+                        "name": "send_file_to_user",
+                        "output": json.dumps(blocks, ensure_ascii=False),
+                    },
+                    delta=False,
+                    index=0,
+                )
+            ],
+        )
 
     async def process(request):
         text = request.input[0].content[0].text
@@ -77,6 +97,7 @@ def make_channel(port, workspace_dir=None):
             raise RuntimeError("deterministic provider failure")
         count = remembered.get(request.session_id, 0) + 1
         remembered[request.session_id] = count
+        extra_events = []
         if text == "local media":
             # A chart the Agent wrote inside its own workspace.
             media_file = Path(workspace_dir) / "media" / "chart.png"
@@ -124,6 +145,39 @@ def make_channel(port, workspace_dir=None):
                     filename="huge.pdf",
                 )
             ]
+        elif text == "sent file":
+            # What `send_file` really does: the bytes go into a tool output,
+            # the answer text stays a separate later message.
+            media_dir = Path(workspace_dir) / "media"
+            media_dir.mkdir(parents=True, exist_ok=True)
+            image = (media_dir / "chart.png").resolve()
+            image.write_bytes(PNG_BYTES)
+            document = (media_dir / "report.pdf").resolve()
+            document.write_bytes(PDF_BYTES)
+            extra_events.append(
+                tool_output_event(
+                    [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "url",
+                                "url": image.as_uri(),
+                                "media_type": "image/png",
+                            },
+                        },
+                        {
+                            "type": "data",
+                            "source": {
+                                "type": "url",
+                                "url": document.as_uri(),
+                                "media_type": "application/pdf",
+                            },
+                        },
+                        {"type": "text", "text": "File sent successfully."},
+                    ]
+                )
+            )
+            content = [TextContent(text=f"Sent you the files {count}.")]
         else:
             content = [
                 TextContent(text=f"Native reply {count}: {text}")
@@ -173,6 +227,9 @@ def make_channel(port, workspace_dir=None):
             )
             yield Event(object="response", status=RunStatus.Completed)
             return
+        # A tool result lands before the answer, as the runtime emits it.
+        for pre_event in extra_events:
+            yield pre_event
         yield Event(
             object="message",
             type=MessageType.REASONING,
@@ -834,6 +891,45 @@ async def test_unsupported_or_oversized_reply_media_is_explained(service):
     _, message = await last_reply(service, conversation, "big media")
     assert message["attachments"] == []
     assert "larger than 5 MB" in message["content"]
+
+
+@pytest.mark.asyncio
+async def test_media_from_a_tool_output_reaches_the_panel(service):
+    """`send_file` hands media over as a tool output, not as the answer."""
+    conversation = await create(service)
+    payload = await submit(service, conversation, "sent file")
+    assert await wait_done(service, payload["requestId"]) == "completed"
+    response = await service.client.get(
+        f"{service.prefix}/conversations/{conversation}/messages",
+    )
+    turn = [
+        message
+        for message in (await response.json())["messages"]
+        if message["role"] == "assistant"
+        and message["requestId"] == payload["requestId"]
+    ]
+    # The tool result becomes its own media-only message, ahead of the text.
+    assert [message["content"] for message in turn] == [
+        "",
+        "Sent you the files 1.",
+    ]
+    attachments = turn[0]["attachments"]
+    assert [item["kind"] for item in attachments] == ["image", "file"]
+    assert [item["name"] for item in attachments] == [
+        "chart.png",
+        "report.pdf",
+    ]
+    assert attachments[0]["mediaType"] == "image/png"
+    assert attachments[1]["mediaType"] == "application/pdf"
+    # Hidden tool results must not leak their label, and no path may travel.
+    assert "File sent successfully." not in json.dumps(turn)
+    assert "file:" not in json.dumps(turn)
+    for item, raw in zip(attachments, [PNG_BYTES, PDF_BYTES]):
+        served = await service.client.get(
+            f"{service.prefix}/media/{item['mediaId']}"
+        )
+        assert served.status == 200
+        assert (await served.read()) == raw
 
 
 @pytest.mark.asyncio
