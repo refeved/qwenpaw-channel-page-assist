@@ -1,4 +1,4 @@
-# Page Assist channel (0.1.2)
+# Page Assist channel (0.1.3)
 
 [简体中文](README.zh-CN.md) | English
 
@@ -10,9 +10,10 @@ the plugin still runs inside the host process.
 A standalone, single-Agent channel plugin. It runs in the QwenPaw process with its own
 HTTP listen port; it does not modify the core, does not deploy a separate relay service,
 and does not call an OpenAI-compatible chat API to bypass the native Agent. It is the
-first backend implementation of the Page Assist **Remote Agent** provider. The current
-release set is v0.1.2: QwenPaw `2.2.2.post1`, Page Assist `agent-usage-v0.1.2`, this
-plugin `qwenpaw-channel-page-assist-v0.1.2` (plugin version `0.1.2`). The UI provider
+first backend implementation of the Page Assist **Remote Agent** provider. This plugin
+is at version `0.1.3`, which adds reply media and needs a matching extension build; the
+last tagged release set is still v0.1.2: QwenPaw `2.2.2.post1`, Page Assist
+`agent-usage-v0.1.2`, this plugin `qwenpaw-channel-page-assist-v0.1.2`. The UI provider
 name is Remote Agent; protocol, storage keys, routes and the frontend client keep the
 `qwenpaw` namespace.
 
@@ -44,13 +45,17 @@ name is Remote Agent; protocol, storage keys, routes and the frontend client kee
   playback and prompt insertion run in the browser. Local RAG, web search, MCP, temporary
   chat, per-chat model settings, OCR, Page Action and WebMCP are unavailable or disabled;
   unconnected entries state their reason.
+- Agent replies can carry images and files back into the side panel (since 0.1.3): the
+  channel buffers the bytes and the browser reads them through its own authenticated
+  route, so a preview or a download never exposes a server path. `protocolVersion` stays
+  1; reply media is the optional `media` capability, and a server that omits it simply
+  never shows attachments under a reply.
 - Firefox does not show the Remote Agent entry (MV2 lacks
   `chrome.storage.local.setAccessLevel`); use Chrome/Chromium or Edge.
 
 Deferred: global multi-Agent discovery, history recovery across restarts, automatic
-reconnect after drops, a persistent request ledger, a cancel button, rich media,
-proactive push, and approval event push. Do not treat this version as a production
-remote gateway.
+reconnect after drops, a persistent request ledger, a cancel button, proactive push,
+and approval event push. Do not treat this version as a production remote gateway.
 
 ## Installation and connection
 
@@ -100,7 +105,9 @@ This version does not rely on a "start the new listener, then close the old one"
 replacement; port conflicts fail loudly.
 
 The steps below require a Page Assist build containing the Remote Agent provider
-(release tag `agent-usage-v0.1.2` or the `feat/qwenpaw-remote-channel` branch).
+(release tag `agent-usage-v0.1.2`, or the `feat/qwenpaw-remote-channel` branch, which
+also renders reply media). Reply media needs the branch build; with an older extension
+the channel still answers every request, but images and files in replies stay hidden.
 After rebuilding and reloading the extension:
 
 1. In the Chrome side panel header, left of the Page Assist wordmark, switch
@@ -142,14 +149,15 @@ native tool approvals still follow the Agent's own policy.
 ## State and data boundaries
 
 The browser path stays on `/api/page-assist`. It serves capabilities, the single Agent,
-new chats, message submission, in-chat history, request status and request events.
-Payloads follow frontend v1 and declare `recovery=false`, `approvals=true`,
-`approvalEvents=false`, `attachments=true` (5 MB per attachment, at most 4 per message);
-attachments upload as base64 via `POST /attachments` and land in the bound Agent
-workspace's `media/page_assist` directory, referenced once per message by attachmentId,
-with the Agent receiving `file://` image/file content. The pending list and decisions go
-through `GET /approvals` and `POST /approvals/{id}/decision`; the frontend reconciles by
-polling every 5 seconds and does not rely on push.
+new chats, message submission, in-chat history, request status, request events and
+reply media bytes. Payloads follow frontend v1 and declare `recovery=false`,
+`approvals=true`, `approvalEvents=false`, `attachments=true` (5 MB per attachment, at
+most 4 per message) and `media=true` (5 MB per file, at most 4 per reply, 64 MB buffered
+per instance); attachments upload as base64 via `POST /attachments` and land in the
+bound Agent workspace's `media/page_assist` directory, referenced once per message by
+attachmentId, with the Agent receiving `file://` image/file content. The pending list
+and decisions go through `GET /approvals` and `POST /approvals/{id}/decision`; the
+frontend reconciles by polling every 5 seconds and does not rely on push.
 
 - Request-body gate: the channel caps the whole HTTP body at 8 MiB (a 5 MiB attachment
   inflates to roughly 4/3 in base64). Behind an HTTPS reverse proxy or relay, the front
@@ -157,6 +165,24 @@ polling every 5 seconds and does not rely on push.
   or the relay returns its own 413 before the channel ever sees the request. The
   extension compresses and retries an image rejected with 413 once, but deployments
   should still provision enough headroom.
+- Reply media mirrors an upload: the channel copies the bytes into the same
+  `media/page_assist` directory and the message references them by `mediaId` only.
+  `GET /media/{id}` serves those bytes back under the same bearer token, so no server
+  path ever reaches the browser; a malformed, unknown or already-evicted id is a 404.
+  `Content-Disposition: inline` is reserved for the image whitelist
+  (png, jpeg, gif, webp, bmp) and everything else downloads as an attachment, so
+  nothing stored here can render as a page.
+- A reply carries at most 4 files, each no larger than 5 MB, and the instance buffers no
+  more than 64 MB in total. An over-limit, empty or unreadable part becomes a readable
+  notice in the reply text instead of a broken download; when new bytes need room, the
+  oldest buffered file is dropped and its message tells the user. The buffer is
+  instance-local, so after a restart every id is gone.
+- The same index also serves uploads back, so an image the user sent is re-shown from
+  the protected route in history rather than as a bare filename.
+- A public `http(s)` URL in a reply is forwarded untouched instead of fetched
+  server-side, which would turn this channel into an open proxy. Only `data:` and
+  `file:` sources are read locally; every other scheme is refused, and the browser
+  rejects non-http(s) links as well.
 - One request at a time per chat; a busy chat returns 409 instead of joining a message
   merge queue.
 - The same requestId with the same payload never re-runs within one instance; differing
@@ -170,6 +196,9 @@ polling every 5 seconds and does not rely on push.
 - Requests, page payloads and the browser display history live in memory only. After the
   channel is re-instantiated the instanceId changes, frontend caches re-partition
   automatically; you must start a new chat — old browser chats cannot be restored.
+- Uploaded and reply media bytes are the exception: they are written under the Agent
+  workspace's `media/page_assist`, and stopping the channel drops the index without
+  deleting the files.
 - Native history, memory or tool side effects may already be persisted and are **not
   deleted when the channel's memory clears**.
 - Closing the browser or hiding the view does not cancel the Agent. After a lost

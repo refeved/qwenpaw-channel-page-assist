@@ -1,4 +1,4 @@
-# Page Assist channel (0.1.2)
+# Page Assist channel (0.1.3)
 
 简体中文 | [English](README.md)
 
@@ -8,9 +8,10 @@
 
 独立安装的单 Agent 频道插件。运行在 QwenPaw 进程内，自带一个 HTTP 监听端口；
 不修改核心、不单独部署中继服务，也不调用 OpenAI-compatible 聊天接口绕过原生 Agent。
-它是 Page Assist **Remote Agent** Provider 的首个后端实现。当前发布组合为
-v0.1.2：QwenPaw `2.2.2.post1`、Page Assist `agent-usage-v0.1.2`、本插件
-`qwenpaw-channel-page-assist-v0.1.2`（插件版本 `0.1.2`）。界面 Provider 名为
+它是 Page Assist **Remote Agent** Provider 的首个后端实现。本插件版本为 `0.1.3`，
+新增回复媒体，需要配套的新版扩展；最近一次打 tag 的发布组合仍是 v0.1.2：
+QwenPaw `2.2.2.post1`、Page Assist `agent-usage-v0.1.2`、本插件
+`qwenpaw-channel-page-assist-v0.1.2`。界面 Provider 名为
 Remote Agent；协议、存储键、路由和前端客户端仍沿用 `qwenpaw` 命名空间。
 
 ## 第一版范围
@@ -34,11 +35,14 @@ Remote Agent；协议、存储键、路由和前端客户端仍沿用 `qwenpaw` 
   由浏览器本地完成。本地 RAG、联网搜索、MCP、临时聊天、逐会话模型参数、
   OCR、Page Action 和 WebMCP 不提供或禁用；
   未接通入口会说明原因。
+- Agent 回复中的图片与文件可显示在侧栏（0.1.3 起）：频道先暂存字节，再由浏览器
+  经同一鉴权路由取回，预览与下载都不暴露服务器路径。`protocolVersion` 仍为 1；
+  回复媒体是可选的 `media` 能力，未声明该能力的服务端只是不在回复下显示附件。
 - Firefox 版本不显示 Remote Agent 入口（MV2 缺少
   `chrome.storage.local.setAccessLevel`）；请使用 Chrome／Chromium 或 Edge。
 
-延期：全局多 Agent 发现、跨重启历史恢复、断线自动恢复、持久请求账本、
-取消按钮、富媒体、主动推送、审批事件推送。不要依赖本版本作为生产远程网关。
+延期：全局多 Agent 发现、跨重启历史恢复、断线自动恢复、持久请求账本、取消按钮、
+主动推送、审批事件推送。不要依赖本版本作为生产远程网关。
 
 ## 安装与连接
 
@@ -82,7 +86,9 @@ qwenpaw plugin install /path/to/qwenpaw-channel-page-assist
 本版本不依赖“先启动新监听、再关闭旧监听”的热替换流程；端口冲突会明确报错。
 
 以下步骤要求使用包含 Remote Agent Provider 的 Page Assist 构建
-（发布 tag `agent-usage-v0.1.2` 或 `feat/qwenpaw-remote-channel` 分支）。
+（发布 tag `agent-usage-v0.1.2`，或同时支持回复媒体渲染的
+`feat/qwenpaw-remote-channel` 分支）。回复媒体需要新版扩展；使用旧版扩展时
+频道仍正常响应所有请求，但回复中的图片与文件不会显示。
 重新构建并重新加载扩展后：
 
 1. 在 Chrome 侧边栏 header 左侧、Page Assist 字样之后，把 **Local models** 切换为
@@ -115,9 +121,10 @@ WSL Chrome 与 QwenPaw 在同一 WSL 环境中时可直接使用上述 loopback 
 ## 状态与数据边界
 
 浏览器路径保持 `/api/page-assist`。提供 capabilities、唯一 Agent、新建聊天、
-提交消息、会话内历史、请求状态及请求事件接口。接口载荷沿用前端 v1，声明
-`recovery=false`、`approvals=true`、`approvalEvents=false`、
-`attachments=true`（单附件上限 5 MB、每条消息最多 4 个）；附件经
+提交消息、会话内历史、请求状态、请求事件与回复媒体字节接口。接口载荷沿用前端 v1，
+声明 `recovery=false`、`approvals=true`、`approvalEvents=false`、
+`attachments=true`（单附件上限 5 MB、每条消息最多 4 个）与
+`media=true`（单文件上限 5 MB、每条回复最多 4 个、每实例暂存总量 64 MB）；附件经
 `POST /attachments` 以 base64 上传，落盘到绑定 Agent 工作区的
 `media/page_assist` 目录，消息按 attachmentId 一次性引用，Agent 侧收到
 `file://` 形式的图片／文件内容。待审批列表与决定走
@@ -128,6 +135,20 @@ WSL Chrome 与 QwenPaw 在同一 WSL 环境中时可直接使用上述 loopback 
   4/3）。若经 HTTPS 反向代理或中继转发，前置层放行的 body 必须不小于 ~7 MiB
   （如 nginx `client_max_body_size 10m;`）；否则中继会先于频道返回自己的 413，
   频道无从感知。扩展会对被 413 拒绝的图片压缩后重试一次，但部署仍应配足额度。
+- 回复媒体与上传是对称的：频道把字节复制进同一个 `media/page_assist` 目录，消息
+  只按 `mediaId` 引用。`GET /media/{id}` 用同一个 Bearer token 把这些字节送回浏览器，
+  因此服务器路径永不外泄；格式非法、未知或已被驱逐的 id 返回 404。
+  `Content-Disposition: inline` 只留给图片白名单（png／jpeg／gif／webp／bmp），
+  其余一律作为附件下载，存放在此的内容无法渲染成网页。
+- 每条回复最多 4 个文件、单个不超过 5 MB，实例暂存总量不超过 64 MB。超限、为空或
+  读取失败的部分会降级为回复正文里可读的提示，而不是坏掉的下载；需要为新字节腾空间
+  时按最旧的暂存文件驱逐，受影响的消息会说明情况。暂存索引只存在于实例内，重启后
+  所有 id 失效。
+- 同一索引也回供已上传的字节，因此历史里用户发出的图片经这条鉴权路由重新显示，
+  不再只剩文件名。
+- 回复中的公共 `http(s)` 链接原样转发，不在服务端抓取——那会把本频道变成开放代理。
+  只有 `data:` 与 `file:` 来源会在本地读取，其他协议一律拒绝；浏览器侧同样只接受
+  http(s) 链接。
 - 同一聊天一次一个请求，占用时返回 409，不进入消息合并队列。
 - 同实例内相同 requestId 与相同负载不会重跑；负载或聊天不同时返回 409。
 - 同时最多保留 100 个聊天、500 个请求；达到容量返回 429，不静默驱逐。
@@ -136,6 +157,8 @@ WSL Chrome 与 QwenPaw 在同一 WSL 环境中时可直接使用上述 loopback 
   冲突的决定返回 409，不覆盖原生结论。
 - 请求、网页负载和浏览器展示历史仅保存在内存。频道重新实例化后 instanceId
   改变，前端缓存自动分区；需要新建聊天，不能恢复旧的浏览器聊天。
+- 已上传与回复媒体的字节是例外：它们写入绑定 Agent 工作区的
+  `media/page_assist`，频道停止只丢弃索引，不删除文件。
 - 原生历史、记忆或工具副作用可能已持久保存，**不随频道内存清空而删除**。
 - 关闭浏览器或停止显示不取消 Agent。提交结果丢失或运行时断线后，前端不自动
   重发，不承诺恢复；请到 Console 核实，避免重复执行有副作用的请求。
