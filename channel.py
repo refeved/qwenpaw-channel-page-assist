@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -13,7 +15,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from urllib.parse import unquote, urlsplit
+from urllib.request import url2pathname
+from uuid import UUID, uuid4
 
 from aiohttp import web
 from qwenpaw.app.approvals import (
@@ -42,6 +46,9 @@ from .protocol import (
     MAX_ATTACHMENTS,
     MAX_ATTACHMENT_BYTES,
     MAX_CONTEXT,
+    MAX_OUTGOING_ATTACHMENTS,
+    MAX_OUTGOING_FILE_BYTES,
+    MAX_OUTGOING_TOTAL_BYTES,
     MAX_TEXT,
     ApprovalDecisionPayload,
     AttachmentUpload,
@@ -55,6 +62,7 @@ TERMINAL = {"completed", "failed", "cancelled"}
 APPROVAL_TARGET_MAX = 2000
 DECISIONS_MAX = 200
 PENDING_ATTACHMENTS_MAX = 32
+OUTGOING_MEDIA_MAX = 32
 MAX_UPLOAD_BODY = 8 * 1024 * 1024
 
 IMAGE_MAGIC = (
@@ -90,6 +98,124 @@ def safe_suffix(name: str) -> str:
     return ""
 
 
+DATA_URL_RE = re.compile(
+    r"^data:(?P<mt>[\w.+-]+/[\w.+-]+)?;base64,(?P<data>.*)$",
+    re.DOTALL,
+)
+# Only bytes that stay inside the media directory are ever written to disk;
+# anything else becomes a file so the browser never receives a raw type.
+INLINE_MEDIA_TYPES = {
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+    "image/bmp",
+}
+MEDIA_TYPE_BY_SUFFIX = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".bmp": "image/bmp",
+    ".svg": "image/svg+xml",
+    ".pdf": "application/pdf",
+    ".txt": "text/plain",
+    ".md": "text/markdown",
+    ".csv": "text/csv",
+    ".json": "application/json",
+    ".html": "text/html",
+    ".doc": "application/msword",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml"
+    ".document",
+    ".xls": "application/vnd.ms-excel",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml"
+    ".sheet",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml"
+    ".presentation",
+    ".zip": "application/zip",
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".ogg": "audio/ogg",
+    ".mp4": "video/mp4",
+    ".webm": "video/webm",
+}
+
+
+def media_type_for(kind: str, name: str, declared: str | None) -> str:
+    """Pick a Content-Type the browser can render or hand to a downloader."""
+    declared = (declared or "").split(";")[0].strip().lower()
+    if declared and declared != "application/octet-stream":
+        return declared
+    guessed = MEDIA_TYPE_BY_SUFFIX.get(safe_suffix(name))
+    if guessed:
+        return guessed
+    if kind == "image":
+        return "image/png"
+    return "application/octet-stream"
+
+
+def media_part_reference(part) -> tuple[str, str, str, str] | None:
+    """Return (kind, payload, name, declared type) for an outgoing media part.
+
+    Payload is a data URL, an absolute local URI, or a remote HTTP(S) URL;
+    audio only ever reaches this point as raw base64, which is treated as a
+    data URL without a declared media type.
+    """
+    kind = getattr(part, "type", None)
+    name = ""
+    if kind == ContentType.IMAGE and getattr(part, "image_url", None):
+        payload = part.image_url
+    elif kind == ContentType.VIDEO and getattr(part, "video_url", None):
+        payload, name = part.video_url, "video.mp4"
+    elif kind == ContentType.AUDIO and getattr(part, "data", None):
+        payload, name = part.data, "audio"
+    elif kind == ContentType.FILE:
+        payload = getattr(part, "file_url", None) or ""
+        name = getattr(part, "filename", None) or ""
+    else:
+        return None
+    if not isinstance(payload, str) or not payload.strip():
+        return None
+    kind = "image" if kind == ContentType.IMAGE else "file"
+    return kind, payload, name, None
+
+
+def media_payload_source(payload: str) -> tuple[str, Any]:
+    """Classify a media payload as data, file, http, or unsupported."""
+    match = DATA_URL_RE.match(payload.strip())
+    if match:
+        return "data", match.groupdict()
+    if payload.startswith("data:"):
+        # Truncated or unparsable data URL: never ship it to the browser.
+        return "unsupported", None
+    try:
+        url = urlsplit(payload)
+    except ValueError:
+        return "unsupported", None
+    if url.scheme == "file":
+        return "file", url
+    if url.scheme in {"http", "https"} and url.netloc:
+        return "http", payload
+    return "unsupported", None
+
+
+def suggested_name(payload: str, source: str, value: Any) -> str:
+    """Best readable basename for media whose part carries no filename."""
+    if source == "http":
+        value = urlsplit(payload)
+        tail = unquote(value.path.rsplit("/", 1)[-1])
+    elif source == "file":
+        tail = unquote(value.path.rsplit("/", 1)[-1])
+    elif source == "data":
+        extension = (value.get("mt") or "").split("/")[-1].split("+")[0]
+        tail = f"image.{extension}" if extension else ""
+    else:
+        tail = ""
+    return sanitize_name(tail)
+
+
 @dataclass
 class Conversation:
     id: str
@@ -106,6 +232,18 @@ class AttachmentRecord:
     bytes: int
     path: Path
     used_by: str | None = None
+
+
+@dataclass
+class OutgoingMedia:
+    """Bytes this channel will serve back to the browser on demand."""
+
+    id: str
+    name: str
+    kind: str
+    media_type: str
+    bytes: int
+    path: Path
 
 
 @dataclass
@@ -160,6 +298,7 @@ class PageAssistChannel(BaseChannel):
         self._conversations: dict[str, Conversation] = {}
         self._requests: dict[str, Request] = {}
         self._attachments: dict[str, AttachmentRecord] = {}
+        self._outgoing_media: dict[str, OutgoingMedia] = {}
         self._decisions: dict[str, dict[str, Any]] = {}
         self._runner: web.AppRunner | None = None
         self._stopping = False
@@ -238,6 +377,7 @@ class PageAssistChannel(BaseChannel):
                     f"{PREFIX}/approvals/{{id}}/decision", self._decide
                 ),
                 web.post(f"{PREFIX}/attachments", self._upload_attachment),
+                web.get(f"{PREFIX}/media/{{id}}", self._media),
             ]
         )
         runner = web.AppRunner(app, shutdown_timeout=2)
@@ -314,6 +454,7 @@ class PageAssistChannel(BaseChannel):
                 "attachments": True,
                 "maxAttachmentBytes": MAX_ATTACHMENT_BYTES,
                 "maxAttachments": MAX_ATTACHMENTS,
+                "media": True,
             }
         )
 
@@ -404,6 +545,7 @@ class PageAssistChannel(BaseChannel):
                 "requestId": payload.requestId,
                 "role": "user",
                 "content": self._user_message_text(payload, attachments),
+                "attachments": self._user_message_attachments(attachments),
                 "status": "complete",
             }
         )
@@ -450,6 +592,25 @@ class PageAssistChannel(BaseChannel):
             f"{payload.text}\n{notes}" if payload.text.strip() else notes
         )
 
+    @staticmethod
+    def _user_message_attachments(attachments) -> list[dict[str, Any]]:
+        """Media references for the browser, next to the textual history line.
+
+        Uploads already live on disk, so the same protected download endpoint
+        that serves Agent media can serve them back: the user sees the real
+        screenshot instead of only a filename.
+        """
+        return [
+            {
+                "mediaId": record.id,
+                "kind": record.kind,
+                "name": record.name,
+                "mediaType": record.media_type,
+                "bytes": record.bytes,
+            }
+            for record in attachments
+        ]
+
     def _media_dir(self) -> Path:
         """Workspace media dir, mirroring the official channels."""
         workspace_dir = (
@@ -487,6 +648,16 @@ class PageAssistChannel(BaseChannel):
             bytes=len(raw),
             path=path,
         )
+        # Register the same bytes in the media index so one protected endpoint
+        # serves both directions and the file shares the outgoing capacity cap.
+        self._outgoing_media[attachment_id] = OutgoingMedia(
+            id=attachment_id,
+            name=name,
+            kind=self._attachments[attachment_id].kind,
+            media_type=media_type,
+            bytes=len(raw),
+            path=path,
+        )
         return web.json_response(
             {
                 "attachmentId": attachment_id,
@@ -496,6 +667,173 @@ class PageAssistChannel(BaseChannel):
                 "bytes": len(raw),
             },
             status=201,
+        )
+
+    def _outgoing_bytes(self) -> int:
+        return sum(record.bytes for record in self._outgoing_media.values())
+
+    def _claim_outgoing_bytes(self, needed: int) -> None:
+        """Free space for *needed* bytes, oldest media first."""
+        for record in sorted(
+            self._outgoing_media.values(),
+            key=lambda item: item.id,
+        ):
+            if self._outgoing_bytes() + needed <= MAX_OUTGOING_TOTAL_BYTES:
+                return
+            self._outgoing_media.pop(record.id, None)
+            record.path.unlink(missing_ok=True)
+
+    def _store_outgoing(
+        self,
+        payload_bytes: bytes,
+        kind: str,
+        name: str,
+        declared: str | None,
+    ) -> dict[str, Any]:
+        """Persist reply media under a fresh id and return its reference."""
+        if not payload_bytes:
+            return {"skip": "Media is empty and was skipped."}
+        if len(payload_bytes) > MAX_OUTGOING_FILE_BYTES:
+            limit = MAX_OUTGOING_FILE_BYTES // (1024 * 1024)
+            return {
+                "skip": (
+                    f"Media '{name}' is larger than {limit} MB "
+                    "and was skipped."
+                )
+            }
+        self._claim_outgoing_bytes(len(payload_bytes))
+        media_id = str(uuid4())
+        image_ext, image_mime = classify_image(payload_bytes)
+        extension = image_ext or safe_suffix(name)
+        path = self._media_dir() / f"{media_id}{extension}"
+        path.write_bytes(payload_bytes)
+        media_type = media_type_for(
+            kind,
+            name,
+            image_mime or declared,
+        )
+        self._outgoing_media[media_id] = OutgoingMedia(
+            id=media_id,
+            name=name,
+            kind=kind,
+            media_type=media_type,
+            bytes=len(payload_bytes),
+            path=path,
+        )
+        return {
+            "media": {
+                "mediaId": media_id,
+                "kind": kind,
+                "name": name,
+                "mediaType": media_type,
+                "bytes": len(payload_bytes),
+            }
+        }
+
+    def _content_parts_for_send(self, parts):
+        """Split outgoing parts into text, media references and skip notices.
+
+        A local file the Agent produced is copied into the media directory, so
+        no absolute server path ever reaches the browser; a public HTTP(S) URL
+        is forwarded untouched because fetching it server-side would turn this
+        channel into an open proxy.
+        """
+        texts, media, notices = [], [], []
+        for part in parts:
+            ptype = getattr(part, "type", None)
+            if ptype == ContentType.TEXT and getattr(part, "text", None):
+                texts.append(part.text)
+                continue
+            if ptype == ContentType.REFUSAL and getattr(part, "refusal", None):
+                texts.append(part.refusal)
+                continue
+            reference = media_part_reference(part)
+            if reference is None:
+                continue
+            kind, payload, name, declared = reference
+            source, value = media_payload_source(payload)
+            if source == "unsupported":
+                notices.append(
+                    f"[{kind}: this attachment format is not "
+                    "supported by the browser channel]"
+                )
+                continue
+            name = sanitize_name(
+                name or suggested_name(payload, source, value)
+            )
+            if len(media) >= MAX_OUTGOING_ATTACHMENTS:
+                notices.append(
+                    f"[{kind}: {name} skipped, more than "
+                    f"{MAX_OUTGOING_ATTACHMENTS} attachments]"
+                )
+                continue
+            if source == "http":
+                media.append(
+                    {
+                        "url": value,
+                        "kind": kind,
+                        "name": name,
+                        "mediaType": media_type_for(kind, name, declared),
+                        "bytes": 0,
+                    }
+                )
+                continue
+            payload_bytes = b""
+            if source == "data":
+                try:
+                    payload_bytes = base64.b64decode(
+                        value["data"],
+                        validate=True,
+                    )
+                except (binascii.Error, ValueError):
+                    notices.append(
+                        f"[{kind}: {name} could not be decoded]"
+                    )
+                    continue
+                declared = declared or value.get("mt")
+            else:
+                local = Path(url2pathname(value.path))
+                if not local.is_file():
+                    notices.append(
+                        f"[{kind}: {name} is no longer available]"
+                    )
+                    continue
+                payload_bytes = local.read_bytes()
+            outcome = self._store_outgoing(
+                payload_bytes,
+                kind,
+                name,
+                declared,
+            )
+            if "skip" in outcome:
+                notices.append(f"[{outcome['skip']}]")
+            else:
+                media.append(outcome["media"])
+        return texts, media, notices
+
+    async def _media(self, request):
+        """Serve reply and upload bytes; the bearer token gates this route."""
+        try:
+            media_id = str(UUID(request.match_info["id"]))
+        except ValueError:
+            raise web.HTTPNotFound(text="Media unavailable") from None
+        record = self._outgoing_media.get(media_id)
+        if record is None or not record.path.is_file():
+            raise web.HTTPNotFound(text="Media unavailable")
+        inline = (
+            record.kind == "image"
+            and record.media_type in INLINE_MEDIA_TYPES
+        )
+        return web.FileResponse(
+            record.path,
+            headers={
+                "Content-Type": record.media_type,
+                "Content-Disposition": (
+                    f'inline; filename="{record.name}"'
+                    if inline
+                    else f'attachment; filename="{record.name}"'
+                ),
+            },
         )
 
     async def _history(self, request):
@@ -545,6 +883,7 @@ class PageAssistChannel(BaseChannel):
                             "type": "message.snapshot",
                             "messageId": message["id"],
                             "content": message["content"],
+                            "attachments": message.get("attachments") or [],
                             "status": message["status"],
                         }
                     )
@@ -845,7 +1184,25 @@ class PageAssistChannel(BaseChannel):
     async def on_event_content(self, request, to_handle, event, send_meta):
         return False
 
-    async def send(self, to_handle, text, meta=None):
+    async def send_content_parts(self, to_handle, parts, meta=None):
+        """Send text plus real media references; never a server-side path.
+
+        The default implementation would flatten every image and file into a
+        `[Image: file:///...]` line, which leaks a local path and stays
+        unusable in the side panel, and its `send_media` hook is a no-op.
+        """
+        texts, media, notices = self._content_parts_for_send(parts)
+        body = "\n".join(texts).strip()
+        prefix = (meta or {}).get("bot_prefix", "") or ""
+        if prefix and body:
+            body = prefix + "  " + body
+        if notices:
+            notice_text = "\n".join(notices)
+            body = f"{body}\n{notice_text}" if body else notice_text
+        if body or media:
+            await self.send(to_handle, body, meta, attachments=media)
+
+    async def send(self, to_handle, text, meta=None, attachments=()):
         conversation = self._conversations.get(to_handle)
         if conversation is None or conversation.active is None:
             raise RuntimeError(
@@ -858,6 +1215,7 @@ class PageAssistChannel(BaseChannel):
                 "requestId": conversation.active,
                 "role": "assistant",
                 "content": text,
+                "attachments": [dict(item) for item in attachments],
                 "status": "complete",
             }
         )

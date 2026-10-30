@@ -13,6 +13,15 @@ MAX_TEXT = 8000
 MAX_CONTEXT = 30000
 MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
 MAX_ATTACHMENTS = 4
+# Agent replies carry media back in the opposite direction: a smaller per-file
+# cap keeps the side panel responsive, and a per-message cap keeps one reply
+# from filling the transcript with downloads.
+MAX_OUTGOING_FILE_BYTES = 5 * 1024 * 1024
+MAX_OUTGOING_ATTACHMENTS = 4
+# Reply media is buffered on disk until the channel restarts, so the total is
+# capped as well; the oldest bytes are dropped first and never silently: the
+# browser gets a readable notice instead.
+MAX_OUTGOING_TOTAL_BYTES = 64 * 1024 * 1024
 
 
 def js_length(value: str) -> int:
