@@ -129,7 +129,10 @@ WSL Chrome 与 QwenPaw 在同一 WSL 环境中时可直接使用上述 loopback 
 `media/page_assist` 目录，消息按 attachmentId 一次性引用，Agent 侧收到
 `file://` 形式的图片／文件内容。待审批列表与决定走
 `GET /approvals` 与 `POST /approvals/{id}/decision`，前端每 5 秒轮询对账，
-不依赖推送。
+不依赖推送。`/capabilities` 的每个应答还附带 `channelVersion`（本插件
+manifest 的版本）与 `hostVersion`（所在 QwenPaw 的版本），只供浏览器设置面板
+显示连到的是哪个部署；读不到就省略该字段，旧版前端会直接忽略，这些字段不参与
+协商，`protocolVersion` 仍为 1。
 
 - 请求体闸门：频道对整个 HTTP body 设 8 MiB 上限（单附件 5 MiB，base64 膨胀约
   4/3）。若经 HTTPS 反向代理或中继转发，前置层放行的 body 必须不小于 ~7 MiB

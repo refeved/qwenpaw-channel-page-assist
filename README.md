@@ -158,6 +158,10 @@ bound Agent workspace's `media/page_assist` directory, referenced once per messa
 attachmentId, with the Agent receiving `file://` image/file content. The pending list
 and decisions go through `GET /approvals` and `POST /approvals/{id}/decision`; the
 frontend reconciles by polling every 5 seconds and does not rely on push.
+Every `/capabilities` answer also carries `channelVersion` (this plugin's own manifest
+version) and `hostVersion` (the QwenPaw it is running under) so the browser settings panel
+can show which deployment answered; a build that cannot read one omits that label, an older
+browser ignores both, and `protocolVersion` stays 1 because nothing is negotiated on them.
 
 - Request-body gate: the channel caps the whole HTTP body at 8 MiB (a 5 MiB attachment
   inflates to roughly 4/3 in base64). Behind an HTTPS reverse proxy or relay, the front

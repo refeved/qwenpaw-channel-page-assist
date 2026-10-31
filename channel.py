@@ -65,6 +65,32 @@ PENDING_ATTACHMENTS_MAX = 32
 OUTGOING_MEDIA_MAX = 32
 MAX_UPLOAD_BODY = 8 * 1024 * 1024
 
+
+def read_channel_version() -> str:
+    """Version this plugin ships with, read from its own manifest."""
+    try:
+        manifest = json.loads(
+            Path(__file__).with_name("plugin.json").read_text("utf-8")
+        )
+        return str(manifest["version"]).strip()
+    except (OSError, ValueError, KeyError, TypeError):
+        return ""
+
+
+def read_host_version() -> str:
+    """QwenPaw's own version, or empty when the host offers no such label."""
+    try:
+        from qwenpaw.__version__ import __version__
+    except ImportError:
+        return ""
+    return str(__version__).strip()
+
+
+# Neither of these is negotiated: they are read once per process because the
+# manifest cannot change while the channel is running.
+CHANNEL_VERSION = read_channel_version()
+HOST_VERSION = read_host_version()
+
 IMAGE_MAGIC = (
     (b"\x89PNG\r\n\x1a\n", ".png", "image/png"),
     (b"\xff\xd8\xff", ".jpg", "image/jpeg"),
@@ -453,22 +479,30 @@ class PageAssistChannel(BaseChannel):
             ) from None
 
     async def _capabilities(self, request):
-        return web.json_response(
-            {
-                "protocolVersion": 1,
-                "instanceId": self._instance,
-                "principalScope": self._user,
-                "maxContextChars": MAX_CONTEXT,
-                "maxTextChars": MAX_TEXT,
-                "recovery": False,
-                "approvals": True,
-                "approvalEvents": False,
-                "attachments": True,
-                "maxAttachmentBytes": MAX_ATTACHMENT_BYTES,
-                "maxAttachments": MAX_ATTACHMENTS,
-                "media": True,
-            }
-        )
+        payload = {
+            "protocolVersion": 1,
+            "instanceId": self._instance,
+            "principalScope": self._user,
+            "maxContextChars": MAX_CONTEXT,
+            "maxTextChars": MAX_TEXT,
+            "recovery": False,
+            "approvals": True,
+            "approvalEvents": False,
+            "attachments": True,
+            "maxAttachmentBytes": MAX_ATTACHMENT_BYTES,
+            "maxAttachments": MAX_ATTACHMENTS,
+            "media": True,
+        }
+        # The versions are an extra for the browser settings panel, so that a
+        # user can tell which deployment they are talking to. Nothing may be
+        # made mandatory by them: an older browser ignores the fields, an older
+        # channel sends neither, and a build that cannot read them omits them
+        # instead of guessing. `protocolVersion` therefore stays 1.
+        if CHANNEL_VERSION:
+            payload["channelVersion"] = CHANNEL_VERSION
+        if HOST_VERSION:
+            payload["hostVersion"] = HOST_VERSION
+        return web.json_response(payload)
 
     async def _agent_name(self):
         """Prefer the name configured in QwenPaw; fall back to the Agent id."""

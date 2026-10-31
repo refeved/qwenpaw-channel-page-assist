@@ -392,6 +392,14 @@ async def test_auth_scope_and_capabilities(service):
     assert caps["approvals"] is True and caps["approvalEvents"] is False
     assert caps["attachments"] is True and caps["maxAttachments"] == 4
     assert caps["maxContextChars"] == 30000
+    # Runtime identity is reported from the shipped manifest and the running
+    # host, not from a constant kept in sync by hand.
+    assert caps["channelVersion"] == json.loads(
+        (PLUGIN / "plugin.json").read_text(encoding="utf-8")
+    )["version"]
+    from qwenpaw.__version__ import __version__ as host_version
+
+    assert caps["hostVersion"] == host_version
     with patch(
         "_page_assist_test_plugin.channel.load_agent_config_async",
         new=AsyncMock(return_value=SimpleNamespace(name="Research Agent")),
